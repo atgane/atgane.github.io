@@ -129,11 +129,6 @@ $$
 
 이제 식$(20)$, 식$(21)$을 식$(14)$에 대입하면 다음의 결과를 얻는다. 
 
-$$\dfrac {\partial^2 E} {\partial x^2} - \dfrac {\partial^2 E} {\partial T^2} =  \left(B^2 - A^2\right) \dfrac {\partial^2 } {\partial T^2 } + \left(BD - AC\right) \dfrac {\partial^2 } {\partial T \partial x} + \left(BD - AC\right) \dfrac {\partial^2 } {\partial x \partial T} + \left(D^2 - C^2 \right) \dfrac {\partial^2 } {\partial x^2}
-$$
-
-$$\dfrac {\partial^2 E} {\partial x'^2} - \dfrac {\partial^2 E} {\partial T'^2}$$
-
 $$
 \begin{align*}
   \dfrac {\partial^2 E} {\partial x^2} - \dfrac {\partial^2 E} {\partial T^2} &=  \left(B^2 - A^2\right) \dfrac {\partial^2 } {\partial T^2 } + \left(BD - AC\right) \dfrac {\partial^2 } {\partial T \partial x} + \left(BD - AC\right) \dfrac {\partial^2 } {\partial x \partial T} + \left(D^2 - C^2 \right) \dfrac {\partial^2 } {\partial x^2}    \\
