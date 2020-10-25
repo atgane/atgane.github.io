@@ -132,7 +132,7 @@ comments:
     repository  : atgane.github.io # GitHub repo
     owner       : atgane # GitHub repo owner
     admin: # GitHub repo owner and collaborators, only these guys can initialize GitHub issues, IT IS A LIST.
-      # - your GitHub Id
+    - atgane  # - your GitHub Id
 
   ## Valine
   # please refer to https://valine.js.org/en/ for more info.
