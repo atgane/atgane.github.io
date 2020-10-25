@@ -131,8 +131,8 @@ comments:
     clientSecret: f4916fa5665abee346a88be058ddef5ad9801bc6 # GitHub Application Client Secret
     repository  : atgane.github.io # GitHub repo
     owner       : atgane # GitHub repo owner
-    admin: # GitHub repo owner and collaborators, only these guys can initialize GitHub issues, IT IS A LIST.
-    - atgane  # - your GitHub Id
+    admin: atgane # GitHub repo owner and collaborators, only these guys can initialize GitHub issues, IT IS A LIST.
+      # - your GitHub Id
 
   ## Valine
   # please refer to https://valine.js.org/en/ for more info.
