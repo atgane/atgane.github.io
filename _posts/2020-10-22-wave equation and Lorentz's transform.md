@@ -86,19 +86,19 @@ $$\dfrac {\partial^2 E} {\partial x^2} = \dfrac {\partial^2 E} {\partial T^2}$$
 
 $$(T, x) \rightarrow (T', x')$$
 
-이때 어떤 행렬 $A$가 존재하여 다음을 만족해야 함을 알 수 있다.
+이때 어떤 행렬 $L$가 존재하여 다음을 만족해야 함을 알 수 있다.
 
-$$\begin{pmatrix} dT \\ dx \end{pmatrix} = A\begin{pmatrix} dT' \\ dx' \end{pmatrix}$$
+$$\begin{pmatrix} dT \\ dx \end{pmatrix} = L\begin{pmatrix} dT' \\ dx' \end{pmatrix}$$
 
 우리는 이 변환을 이제 파동방정식에 집어넣어서 방정식의 꼴을 보존시키는 변환을 찾아볼 것이다. 이 말은 관성좌표계안에서 $(T, x) \rightarrow (T', x')$로 좌표변환이 일어났을 때 파동의 속도를 보존하는 좌표변환을 찾아본다는 것이고 결론으로 빛의 속도를 보존하는 변환을 찾는 것이다. 이를 식으로 표현하면 다음과 같다.
 
 $$\dfrac {\partial^2 E} {\partial x^2} - \dfrac {\partial^2 E} {\partial T^2} = \dfrac {\partial^2 E} {\partial x'^2} - \dfrac {\partial^2 E} {\partial T'^2}$$
 
-이제 본격적으로 행렬 $A$가 만족해야할 조건이 무엇인지 찾아보자. 우선 행렬 $A$를 다음과 같이 정의하자.
+이제 본격적으로 행렬 $L$가 만족해야할 조건이 무엇인지 찾아보자. 우선 행렬 $L$를 다음과 같이 정의하자.
 
 $$
 \begin{align*}
-A = \begin{pmatrix} A & B \\ C & D \end{pmatrix}
+L = \begin{pmatrix} A & B \\ C & D \end{pmatrix}
 \end{align*}
 $$
 
@@ -110,12 +110,20 @@ $$dx = CdT' + Ddx' = \dfrac {\partial x} {\partial T'}dT' + \dfrac {\partial x} 
 
 따라서 다음의 규칙을 얻는다.
 
-$$A =A = \begin{pmatrix} A & B \\ C & D \end{pmatrix}= \begin{pmatrix} \dfrac {\partial T} {\partial T'} & \dfrac {\partial T} {\partial x'} \\ \dfrac {\partial x} {\partial T'} & \dfrac {\partial x} {\partial x'} \end{pmatrix}$$
+$$L = \begin{pmatrix} A & B \\ C & D \end{pmatrix}= \begin{pmatrix} \dfrac {\partial T} {\partial T'} & \dfrac {\partial T} {\partial x'} \\ \dfrac {\partial x} {\partial T'} & \dfrac {\partial x} {\partial x'} \end{pmatrix}$$
 
 $$
-\dfrac {\partial} {\partial T'} = \dfrac {\partial T} {\partial T'}\dfrac {\partial } {\partial T} + \dfrac {\partial x} {\partial T'}\dfrac {\partial } {\partial x}
+\dfrac {\partial} {\partial T'} = \dfrac {\partial T} {\partial T'}\dfrac {\partial } {\partial T} + \dfrac {\partial x} {\partial T'}\dfrac {\partial } {\partial x} = A\dfrac {\partial } {\partial T} + C\dfrac {\partial } {\partial x}
 $$
 
 $$
-\dfrac {\partial} {\partial x'} = \dfrac {\partial T} {\partial x'}\dfrac {\partial } {\partial T} + \dfrac {\partial x} {\partial x'}\dfrac {\partial } {\partial x}
+\dfrac {\partial} {\partial x'} = \dfrac {\partial T} {\partial x'}\dfrac {\partial } {\partial T} + \dfrac {\partial x} {\partial x'}\dfrac {\partial } {\partial x} = B\dfrac {\partial } {\partial T} + D\dfrac {\partial } {\partial x}
+$$
+
+$$
+\dfrac {\partial^2} {\partial {T'}^2} = A^2 \dfrac {\partial^2 } {\partial T^2 } + 2AC \dfrac {\partial^2 } {\partial T \partial x} + C^2 \dfrac {\partial^2 } {\partial x^2}
+$$
+
+$$
+\dfrac {\partial^2} {\partial {x'}^2} = B^2 \dfrac {\partial^2 } {\partial T^2 } + 2BD \dfrac {\partial^2 } {\partial T \partial x} + D^2 \dfrac {\partial^2 } {\partial x^2}
 $$
