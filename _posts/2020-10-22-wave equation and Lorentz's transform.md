@@ -143,8 +143,41 @@ $$
 
 이때 각각의 항을 정리하여 빼면 다음이 성립한다.
 
-$$B^2 - A^2 = 0$$
+$$
+B^2 - A^2 = 0
+$$
 
-$$BD- AC = 0$$
+$$
+BD- AC = 0
+$$
 
-$$D^2 - C^2 = 0$$
+$$
+D^2 - C^2 = 0
+$$
+
+이때 다음과 같이 치환하면 위의 식이 성립한다.
+
+$$A=\cosh\phi, \ B=\sinh\phi$$
+$$C=\sinh\psi, \ D=\cosh\psi$$
+
+이때 식$(25)$에 의하여
+$$\cosh\phi\sinh\psi - \sinh\phi\cosh\psi = 0$$
+이므로 
+$$\phi = \psi$$
+이다. 따라서 식$(13)$을 다시 표현하면
+
+$$\begin{pmatrix} dT \\ dx \end{pmatrix} = \begin{pmatrix} \cosh\phi & \sinh\phi \\ \sinh\phi & \cosh\phi \end{pmatrix} \begin{pmatrix} dT' \\ dx' \end{pmatrix}$$
+
+이다. 한편 역변환은
+
+$$\begin{pmatrix} dT' \\ dx' \end{pmatrix} = \begin{pmatrix} \cosh \left(-\phi\right) & \sinh\left(-\phi\right) \\ \sinh\left(-\phi\right) & \cosh\left(-\phi\right) \end{pmatrix} \begin{pmatrix} dT \\ dx \end{pmatrix}$$
+
+이 성립하므로  $(-\phi) \rightarrow \phi'$로 치환하면 같은 꼴의 변환이 된다. 
+
+중간정리를 하면 다음과 같다.
+
+>1. 진공조건의 멕스웰 방정식을 잘 요리조리(?)하면 파동방정식이 나온다.
+>2. 같은 관성좌표계에서 빛의 속도는 같게 측정되므로 $(T, x)$좌표계와 $(T', x')$좌표계의 파동방정식이 동등한 형태를 갖는다.
+>3. 전미분을 이용하여 변환행렬의 원소를 각각 구하면 하이퍼볼릭 함수로 구성된 행렬이 나온다는 것을 알 수 있다.
+
+즉, 우리는 빛의 속도가 일정하다는 가정으로 파동방정식에서 좌표계의 변환이 특정한 방법으로 이루어져야 함을 알았다. 이제 $\cos\phi$와 $\sinh\phi$의 의미를 알아보자. 
