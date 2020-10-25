@@ -6,7 +6,6 @@ categories:
   상대성이론 편미분방정식 전자기학
 tags:
   상대성이론 편미분방정식 전자기학
-key: 20201010
 ---
 
 # 0. 소개    
@@ -104,9 +103,9 @@ $$
 
 이때 식$(13)$을 전미분 공식을 이용하여 풀어쓰면 다음과 같다.
 
-$$dT = AdT' + Bdx' = \dfrac {\partial T} {\partial T'}dT' + \dfrac {\partial T} {\partial x'}dx' $$
+$$dT = AdT' + Bdx' = \dfrac {\partial T} {\partial T'}dT' + \dfrac {\partial T} {\partial x'}dx'$$
 
-$$dx = CdT' + Ddx' = \dfrac {\partial x} {\partial T'}dT' + \dfrac {\partial x} {\partial x'}dx' $$
+$$dx = CdT' + Ddx' = \dfrac {\partial x} {\partial T'}dT' + \dfrac {\partial x} {\partial x'}dx'$$
 
 따라서 다음의 규칙을 얻는다.
 
@@ -121,9 +120,31 @@ $$
 $$
 
 $$
-\dfrac {\partial^2} {\partial {T'}^2} = A^2 \dfrac {\partial^2 } {\partial T^2 } + 2AC \dfrac {\partial^2 } {\partial T \partial x} + C^2 \dfrac {\partial^2 } {\partial x^2}
+\dfrac {\partial^2} {\partial {T'}^2} = A^2 \dfrac {\partial^2 } {\partial T^2 } + AC \dfrac {\partial^2 } {\partial T \partial x} + AC \dfrac {\partial^2 } {\partial x \partial T} + C^2 \dfrac {\partial^2 } {\partial x^2}
 $$
 
 $$
-\dfrac {\partial^2} {\partial {x'}^2} = B^2 \dfrac {\partial^2 } {\partial T^2 } + 2BD \dfrac {\partial^2 } {\partial T \partial x} + D^2 \dfrac {\partial^2 } {\partial x^2}
+\dfrac {\partial^2} {\partial {x'}^2} = B^2 \dfrac {\partial^2 } {\partial T^2 } + BD \dfrac {\partial^2 } {\partial T \partial x} + BD \dfrac {\partial^2 } {\partial x \partial T} + D^2 \dfrac {\partial^2 } {\partial x^2}
 $$
+
+이제 식$(20)$, 식$(21)$을 식$(14)$에 대입하면 다음의 결과를 얻는다. 
+
+$$\dfrac {\partial^2 E} {\partial x^2} - \dfrac {\partial^2 E} {\partial T^2} =  \left(B^2 - A^2\right) \dfrac {\partial^2 } {\partial T^2 } + \left(BD - AC\right) \dfrac {\partial^2 } {\partial T \partial x} + \left(BD - AC\right) \dfrac {\partial^2 } {\partial x \partial T} + \left(D^2 - C^2 \right) \dfrac {\partial^2 } {\partial x^2}
+$$
+
+$$\dfrac {\partial^2 E} {\partial x'^2} - \dfrac {\partial^2 E} {\partial T'^2}$$
+
+
+
+$$
+\begin{align*}
+  \dfrac {\partial^2 E} {\partial x^2} - \dfrac {\partial^2 E} {\partial T^2} =  \left(B^2 - A^2\right) \dfrac {\partial^2 } {\partial T^2 } + \left(BD - AC\right) \dfrac {\partial^2 } {\partial T \partial x} + \left(BD - AC\right) \dfrac {\partial^2 } {\partial x \partial T} + \left(D^2 - C^2 \right) \dfrac {\partial^2 } {\partial x^2}    \\
+  &=\dfrac {\partial^2 E} {\partial x'^2} - \dfrac {\partial^2 E} {\partial T'^2}
+\end{align*}
+$$
+
+이때 각각의 항을 정리하여 빼면 다음이 성립한다.
+
+$$B^2 - A^2 = 0$$
+$$BD- AC = 0$$
+$$D^2 - C^2 = 0$$
