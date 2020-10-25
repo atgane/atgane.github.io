@@ -113,13 +113,9 @@ $$dx = CdT' + Ddx' = \dfrac {\partial x} {\partial T'}dT' + \dfrac {\partial x} 
 $$A =A = \begin{pmatrix} A & B \\ C & D \end{pmatrix}= \begin{pmatrix} \dfrac {\partial T} {\partial T'} & \dfrac {\partial T} {\partial x'} \\ \dfrac {\partial x} {\partial T'} & \dfrac {\partial x} {\partial x'} \end{pmatrix}$$
 
 $$
-\dfrac {\partial} {\partial T'} &= \dfrac {\partial T} {\partial T'}\dfrac {\partial } {\partial T} + \dfrac {\partial x} {\partial T'}\dfrac {\partial } {\partial x}    \\
-&= a * b
+\dfrac {\partial} {\partial T'} = \dfrac {\partial T} {\partial T'}\dfrac {\partial } {\partial T} + \dfrac {\partial x} {\partial T'}\dfrac {\partial } {\partial x}
 $$
 
 $$
 \dfrac {\partial} {\partial x'} = \dfrac {\partial T} {\partial x'}\dfrac {\partial } {\partial T} + \dfrac {\partial x} {\partial x'}\dfrac {\partial } {\partial x}
 $$
-
-이렇게 좋은날~
-
