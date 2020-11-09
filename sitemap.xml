@@ -1,0 +1,81 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<urlset
+      xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+	  xmlns:xhtml="http://www.w3.org/1999/xhtml"
+      xsi:schemaLocation="http://www.sitemaps.org/schemas/sitemap/0.9 http://www.sitemaps.org/schemas/sitemap/0.9/sitemap.xsd"
+      xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">	  	  
+<!-- www.check-domains.com sitemap generator -->
+
+<url>
+   <loc>https://atgane.github.io/</loc>
+   <lastmod>2020-11-09T14:49:57+00:00</lastmod>
+   <changefreq>always</changefreq>
+   <priority>1.0000</priority>
+</url>
+<url>
+   <loc>https://atgane.github.io/feed.xml</loc>
+   <lastmod>2020-11-09T16:17:26+00:00</lastmod>
+   <changefreq>always</changefreq>
+   <priority>0.8000</priority>
+</url>
+<url>
+   <loc>https://atgane.github.io/archive.html</loc>
+   <lastmod>2020-11-09T14:49:57+00:00</lastmod>
+   <changefreq>always</changefreq>
+   <priority>0.8000</priority>
+</url>
+<url>
+   <loc>https://atgane.github.io/about.html</loc>
+   <lastmod>2020-11-09T14:49:57+00:00</lastmod>
+   <changefreq>always</changefreq>
+   <priority>0.8000</priority>
+</url>
+<url>
+   <loc>https://atgane.github.io/%EB%B8%94%EB%A1%9C%EA%B7%B8%EB%A7%8C%EB%93%A4%EA%B8%B0/2020/11/10/%EA%B9%83%ED%97%88%EB%B8%8C-%EB%B8%94%EB%A1%9C%EA%B7%B8%EB%A7%8C%EB%93%A4%EA%B8%B0(3)-disqus%EB%A1%9C-%EB%8C%93%EA%B8%80%EA%B8%B0%EB%8A%A5-%EC%9D%B4%EC%9A%A9%ED%95%98%EA%B8%B0.html</loc>
+   <lastmod>2020-11-09T14:49:57+00:00</lastmod>
+   <changefreq>always</changefreq>
+   <priority>0.8000</priority>
+</url>
+<url>
+   <loc>https://atgane.github.io/%EB%B8%94%EB%A1%9C%EA%B7%B8%EB%A7%8C%EB%93%A4%EA%B8%B0/2020/11/09/%EA%B9%83%ED%97%88%EB%B8%8C-%EB%B8%94%EB%A1%9C%EA%B7%B8%EB%A7%8C%EB%93%A4%EA%B8%B0(2)-%EA%B5%AC%EA%B8%80-%EC%95%A0%EB%84%90%EB%A6%AC%ED%8B%B1%EC%8A%A4-%EC%97%B0%EB%8F%99%ED%95%98%EA%B8%B0.html</loc>
+   <lastmod>2020-11-09T14:49:57+00:00</lastmod>
+   <changefreq>always</changefreq>
+   <priority>0.8000</priority>
+</url>
+<url>
+   <loc>https://atgane.github.io/%EB%B8%94%EB%A1%9C%EA%B7%B8%EB%A7%8C%EB%93%A4%EA%B8%B0/2020/11/04/%EA%B9%83%ED%97%88%EB%B8%8C-%EB%B8%94%EB%A1%9C%EA%B7%B8%EB%A7%8C%EB%93%A4%EA%B8%B0(1)-TeXt-%ED%85%8C%EB%A7%88%EB%A1%9C-%EA%B9%83%ED%97%88%EB%B8%8C-%EB%B8%94%EB%A1%9C%EA%B7%B8-%EC%8B%9C%EC%9E%91%ED%95%98%EA%B8%B0.html</loc>
+   <lastmod>2020-11-09T14:49:57+00:00</lastmod>
+   <changefreq>always</changefreq>
+   <priority>0.8000</priority>
+</url>
+<url>
+   <loc>https://atgane.github.io/%EC%83%81%EB%8C%80%EC%84%B1%EC%9D%B4%EB%A1%A0/2020/10/29/%EC%83%81%EB%8C%80%EC%84%B1%EC%9D%B4%EB%A1%A0.-%EB%AF%BC%EC%BD%94%ED%94%84%EC%8A%A4%ED%82%A4-%EA%B3%B5%EA%B0%84.html</loc>
+   <lastmod>2020-11-09T14:49:57+00:00</lastmod>
+   <changefreq>always</changefreq>
+   <priority>0.8000</priority>
+</url>
+<url>
+   <loc>https://atgane.github.io/%EC%83%81%EB%8C%80%EC%84%B1%EC%9D%B4%EB%A1%A0/2020/10/27/%EC%83%81%EB%8C%80%EC%84%B1%EC%9D%B4%EB%A1%A0.-%EC%83%81%EB%8C%80%EC%84%B1%EC%9B%90%EB%A6%AC%EC%99%80-%EB%A1%9C%EB%A0%8C%EC%B8%A0%EB%B3%80%ED%99%98.html</loc>
+   <lastmod>2020-11-09T14:49:57+00:00</lastmod>
+   <changefreq>always</changefreq>
+   <priority>0.8000</priority>
+</url>
+<url>
+   <loc>https://atgane.github.io/%EC%83%81%EB%8C%80%EC%84%B1%EC%9D%B4%EB%A1%A0/%ED%8E%B8%EB%AF%B8%EB%B6%84%EB%B0%A9%EC%A0%95%EC%8B%9D/%EC%A0%84%EC%9E%90%EA%B8%B0%ED%95%99/2020/10/26/%EC%83%81%EB%8C%80%EC%84%B1%EC%9D%B4%EB%A1%A0.-%ED%8C%8C%EB%8F%99%EB%B0%A9%EC%A0%95%EC%8B%9D%EA%B3%BC-%EA%B4%91%EC%86%8D%EB%B6%88%EB%B3%80%EC%84%B1.html</loc>
+   <lastmod>2020-11-09T14:49:57+00:00</lastmod>
+   <changefreq>always</changefreq>
+   <priority>0.8000</priority>
+</url>
+<url>
+   <loc>https://atgane.github.io/blog/2020/10/13/post2.html</loc>
+   <lastmod>2020-11-09T14:49:57+00:00</lastmod>
+   <changefreq>always</changefreq>
+   <priority>0.8000</priority>
+</url>
+<url>
+   <loc>https://atgane.github.io/404.html</loc>
+   <lastmod>2020-11-09T14:49:57+00:00</lastmod>
+   <changefreq>always</changefreq>
+   <priority>0.6400</priority>
+</url>
+</urlset>
