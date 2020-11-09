@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://atgane.github.io/sitemap.xml
