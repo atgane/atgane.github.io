@@ -1,26 +1,27 @@
-#include<stdio.h>
-#include<stdlib.h>
+#include <iostream>
+#include <vector>
+using namespace std;
 
-int main()
-{
-    int* p;
-    int i, hap = 0;
-    int cnt;
 
-    printf("입력할 개수는? \n");
-    scanf("%d", &cnt);
+int main(){
 
-    p = (int*)malloc(sizeof(int) * cnt);
+    vector<int> v;
 
-    for(i = 0; i < cnt; i++)
-    {
-        printf("%d 번째 숫자:", i + 1);
-        scanf("%d", p + i);
+    v.push_back(10);
+    v.push_back(20);
+    v.push_back(30); 
+    v.push_back(40);
+    vector<int>::iterator iter=v.begin(); 
+    v.push_back(50);
+ // 벡터 반복자 시작지점
+
+    cout << iter[3] << endl;  // 임의접근
+
+
+    // 반복
+    for (iter = v.begin(); iter != v.end(); ++iter){
+        cout << *iter << endl;
     }
 
-    for(i = 0; i < cnt; i++)
-        hap = hap + *(p + i);
-    
-    printf("입력 숫자 합 ==> %d\n", hap);
-    free(p);
+    return 0;
 }
