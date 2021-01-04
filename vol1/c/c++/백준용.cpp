@@ -1,40 +1,31 @@
 #include<iostream>
-int max(int (&arr)[2])
+int max(int _list[1001], int boundary)
 {
-    if(arr[0] > arr[1])
-    {return arr[0];}
-    else
-    {return arr[1];}
-    
-}
-
-void copy(int (&arr1)[2], int (&arr2)[2])
-{
-    for(int i = 0; i < 2; ++i)
+    int ret = 0;
+    for(int i = 0; i < boundary; ++i)
     {
-        arr1[i] = arr2[i];
+        if(ret < _list[i])
+        {ret = _list[i];}
     }
+    return ret;
 }
 
 int main()
 {
-    int n;
+    int memo_list[1001] = {0}; int n;
     std::cin >> n;
-    int inp;
-    int rem[2]; int memo1[2] = {0}; int memo2[2] = {0};
-
-    std::cin >> inp;
-    memo2[0] = inp;
-    memo2[1] = inp;
-
-    for(int i = 0; i < n - 1; ++i)
+    for(int i = 0; i < n; ++i)
     {
-        std::cin >> inp;
-        rem[0] = max(memo1) + inp;
-        rem[1] = memo2[0] + inp;
-        copy(memo1, memo2);
-        copy(memo2, rem);
+        int temp_val;
+        std::cin >> temp_val;
+        if(i == 0)
+        {
+            memo_list[temp_val] += 1;
+        }
+        else
+        {
+            memo_list[temp_val] = max(memo_list, temp_val) + 1;
+        }
     }
-    std::cout << max(memo2);
-    return 0;
+    std::cout << max(memo_list, 1001);
 }

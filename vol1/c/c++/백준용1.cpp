@@ -1,58 +1,43 @@
-#include<cstdlib>
 #include<iostream>
-long long sum(long long (&_arr)[9])
+
+void copy(int (&_list1)[3], int (&_list2)[3])
 {
-    long long ret = 0;
-    for(long long i = 0; i < 9; ++i)
+    for(int i = 0; i < 3; ++i)
     {
-        ret += _arr[i];
+        _list1[i] = _list2[i];
     }
-    return ret;
 }
 
-void copy(long long (&_arr1)[9], long long (&_arr2)[9])
+int max(int a, int b, int c)
 {
-    for(long long i = 0; i < 9; ++i)
-    {
-        _arr1[i] = _arr2[i];
-    }
+    if(a > b && a > c)
+    {return a;}
+    else if(b > a && b > c)
+    {return b;}
+    else
+    {return c;}
 }
 
 int main()
 {
-    long long memo1[9] = {0}; long long memo2[9]; long long ram1[9];
-    long long n;
+    int n; int m1[3] = {0}; int m2[3] = {0}; int ram[3]; int inp;
     std::cin >> n;
-    for(long long i = 0; i < 9; ++i)
+    std::cin >> inp;
+    m2[1] = inp;
+    for(int i = 0; i < n - 1; ++i)
     {
-        memo2[i] = 1;
-    }
-
-    for(long long j = 0; j < n - 1; ++j)
-    {
-        copy(ram1, memo2);
-        for(long long i = 0; i < 9; ++i)
+        for(int j = 0; j < 3; ++j)
         {
-            if(i == 0 && j == 0)
-            {
-                memo2[i] =ram1[1] + memo1[0] + 1;
-            }
-            else if(i == 0)
-            {
-                memo2[i] = ram1[1] + memo1[0];
-            } 
-            else if(i == 8)
-            {
-                memo2[i] = ram1[7];
-            }
-            else
-            {
-                memo2[i] = ram1[i - 1] + ram1[i + 1];
-            }
-            memo2[i] = memo2[i] % 1000000000;
+            std::cout << m2[j] << " ";
         }
-        copy(memo1, ram1);
+        std::cout << std::endl;
+        std::cin >> inp;
+        copy(ram, m2);
+        m2[0] = max(m1[0], m1[1], m1[2]);
+        m2[1] = ram[0] + inp;
+        m2[2] = ram[1] + inp;
+        copy(m1, ram);
     }
-    std::cout << sum(memo2) % 1000000000;
+    std::cout << max(m2[0], m2[1], m2[2]);
     return 0;
 }
