@@ -1,42 +1,35 @@
 #include<iostream>
-int max(int _list[501], int boundary)
+int max(int a, int b)
 {
-    int ret = 0;
-    for(int i = 0; i < boundary; ++i)
-    {
-        if(ret < _list[i])
-        {ret = _list[i];}
-    }
-    return ret;
+    if(a > b)
+    {return a;}
+    else
+    {return b;}
 }
-
-int main()
+int main(void)
 {
-    int memo_list[501] = {0}; int n;
+    int n, memo[10001] = {0};
     std::cin >> n;
-    for(int i = 0; i < n; ++i)
+    int ram1, ram2;
+    for(int i = 1; i <= n; ++i)
     {
-        int a, b;
-        std::cin >> a;
-        std::cin >> b;
-        memo_list[a] = b;
-    }
-    int ret_list[501] = {0};
-    int index = 0;
-    for(int i = 0; i < 501; ++i)
-    {
-        if(memo_list[i] != 0)
+        if(i == 1)
         {
-            if(index == 0)
-            {
-                ret_list[memo_list[i]] +=1;
-                index +=1;
-            }
-            else
-            {
-                ret_list[memo_list[i]] = max(ret_list, memo_list[i]) + 1;
-            }
+            std::cin >> ram2;
+            memo[i] = ram2;
+        }
+        else if(i == 2)
+        {
+            ram1 = ram2;
+            std::cin >> ram2;
+            memo[i] = ram1 + ram2;
+        }
+        else
+        {
+            ram1 = ram2;
+            std::cin >> ram2;
+            memo[i] = max(memo[i - 1], max(memo[i - 2] + ram2, memo[i - 3] + ram1 + ram2));
         }
     }
-    std::cout << n - max(ret_list, 501);
+    std::cout << memo[n];
 }
