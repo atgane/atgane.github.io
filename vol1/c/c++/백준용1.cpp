@@ -1,43 +1,42 @@
 #include<iostream>
-
-void copy(int (&_list1)[3], int (&_list2)[3])
+int max(int _list[501], int boundary)
 {
-    for(int i = 0; i < 3; ++i)
+    int ret = 0;
+    for(int i = 0; i < boundary; ++i)
     {
-        _list1[i] = _list2[i];
+        if(ret < _list[i])
+        {ret = _list[i];}
     }
-}
-
-int max(int a, int b, int c)
-{
-    if(a > b && a > c)
-    {return a;}
-    else if(b > a && b > c)
-    {return b;}
-    else
-    {return c;}
+    return ret;
 }
 
 int main()
 {
-    int n; int m1[3] = {0}; int m2[3] = {0}; int ram[3]; int inp;
+    int memo_list[501] = {0}; int n;
     std::cin >> n;
-    std::cin >> inp;
-    m2[1] = inp;
-    for(int i = 0; i < n - 1; ++i)
+    for(int i = 0; i < n; ++i)
     {
-        for(int j = 0; j < 3; ++j)
-        {
-            std::cout << m2[j] << " ";
-        }
-        std::cout << std::endl;
-        std::cin >> inp;
-        copy(ram, m2);
-        m2[0] = max(m1[0], m1[1], m1[2]);
-        m2[1] = ram[0] + inp;
-        m2[2] = ram[1] + inp;
-        copy(m1, ram);
+        int a, b;
+        std::cin >> a;
+        std::cin >> b;
+        memo_list[a] = b;
     }
-    std::cout << max(m2[0], m2[1], m2[2]);
-    return 0;
+    int ret_list[501] = {0};
+    int index = 0;
+    for(int i = 0; i < 501; ++i)
+    {
+        if(memo_list[i] != 0)
+        {
+            if(index == 0)
+            {
+                ret_list[memo_list[i]] +=1;
+                index +=1;
+            }
+            else
+            {
+                ret_list[memo_list[i]] = max(ret_list, memo_list[i]) + 1;
+            }
+        }
+    }
+    std::cout << n - max(ret_list, 501);
 }
