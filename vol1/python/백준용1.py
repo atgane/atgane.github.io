@@ -3,11 +3,6 @@ n, m = list(map(int, sys.stdin.readline().split()))
 map = [list(map(int, sys.stdin.readline().split())) for _ in range(n)]
 
 def cnt(_y, _x, _c):
-    for i in range(n):
-        for j in range(m):
-            print(map[i][j], end=" ")
-        print()
-    print()
     bf1 = False
     for j in range(_y, n):
         for i in range(_x, m):
@@ -26,4 +21,3 @@ for i in range(n + 2):
         print(i - 1)
         break
     v = cnt(i, 0, 0)
-    print(i, " a")
