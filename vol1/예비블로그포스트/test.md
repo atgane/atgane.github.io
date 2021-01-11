@@ -1,6 +1,6 @@
 ---
 layout: article
-title: "백준 13904 파이썬"
+title: "백준 16288 파이썬"
 
 categories:
   [백준, 그리디 알고리즘]
@@ -9,37 +9,35 @@ tags:
 key: 100
 ---
 
-덱을 이용하여 구현해 보았다.
+처음 들어오는 $n$개의 입국승객 번호를 data로 저장한다. 여기서 생각해야 할 것은 최대로 효율적인 방법으로, 즉 심사창구를 최대한 덜 사용하는 방법으로 배치할 수 없다면 주어진 순서대로 입국장을 빠져나갈 수 없다는 것이다. 따라서 효율적으로 배치하는 방법을 우선 찾아야 한다. 
 
-마감일이 많이 남은 과제를 앞에 오게 정렬하고 덱으로 만들고 제일 앞에 온 원소의 남은 마감일을 date라는 변수로 저장한다. 
-
-이제 date와 같은 마감일을 갖는 과제를 res_list라는 곳에 저장하기로 한다. 저장된 자료가 있으면 점수순으로 정렬하고 가장 뒤에 있는 값을 pop 메서드를 이용해서 뽑아온다. 이를 date에서 1씩 빼면서 과정을 반복해준다. date가 0이면 종료한다. 
-
-- 자꾸 그리디 알고리즘을 덱으로 풀고 있는데 
+주어진 순서에 대하여 효율적으로 심사창구에 $(i - 1)$명의 승객이 배치된 경우 $i$명의 승객을 배치하는 방법을 생각해보자. $i$번째 승객의 들어온 순서 $\pi_i$가 이전에 들어온 모든 승객의 순서보다 작다면 기존에 효율적으로 배치한 심사창구에 $i$번째 승객을 배치할 수 없으니 새로운 심사창구에 배치해야 한다. 하지만 그렇지 않다면 창구중에 가장 뒤에 서 있는 승객의 순서와 $\pi_i$의 차가 작은 곳에 배치하면 된다.
 
 ``` python
 import sys
-from collections import deque
-n = int(input())
-data = []
+n, k = list(map(int, sys.stdin.readline().split()))
+data = list(map(int, sys.stdin.readline().split()))
+q = [[0] for i in range(k)]
+flag = 1
 for i in range(n):
-    data.append(list(map(int, sys.stdin.readline().split())))
-data = sorted(data, key= lambda x: -x[0])
-data_deque = deque(data)
-ret = 0
-res_list = []
-date = data_deque[0][0]
-while True:
-    while len(data_deque) != 0:
-        if data_deque[0][0] != date:
-            break
-        res_list.append(data_deque.popleft())
-    if len(res_list) != 0:
-        res_list = sorted(res_list, key= lambda x: x[1])
-        tmp = res_list.pop()
-        ret += tmp[1]
-    date -= 1
-    if date == 0:
-        break
-sys.stdout.write(f"{ret}")
+    if i == 0:
+        q[0].append(data[i])
+    else:
+        min = data[i]
+        loc = -1
+        for j in range(flag):
+            if data[i] > q[j][-1] and min > data[i] - q[j][-1]:
+                min = data[i] - q[j][-1]
+                loc = j
+        if loc == -1:
+            flag += 1
+            if flag > k:
+                print("NO")
+                flag = -1
+                break
+            q[flag - 1].append(data[i])
+        else:
+            q[loc].append(data[i])
+if flag != -1:
+    print("YES")
 ```
