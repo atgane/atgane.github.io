@@ -1,47 +1,16 @@
 import sys
-n, r, q = list(map(int, sys.stdin.readline().split()))
-inp_list = []
-node_list = [0 for _ in range(n + 1)]
-memo_list = [-1 for _ in range(n + 1)]
-for _ in range(n - 1):
-    vol_list = list(map(int, sys.stdin.readline().split()))
-    inp_list.append(vol_list)
-    node_list[vol_list[0]] += 1
-    node_list[vol_list[1]] += 1
-        
-for i in range(n + 1):
-    if i != r:
-        node_list[i] -= 1
-
-def func(q, p):
-    if node_list[q] == 0:
-        return 1
-    elif memo_list[q] != -1:
-        return memo_list[q]
-    elif q == r:
-        return n
-    else:
-        count = 0
-        ret = 0
-        for i in range(n - 1):
-            if p not in inp_list[i] and q in inp_list[i]:
-                count += 1
-                a = list(set(inp_list) - set([q]))[0]
-                if a == n:
-                    return n;
-                ret += func(a, q)
-            if count == node_list[q] - 1:
-                break
-        
-        
-
-for _ in range(q):
-    q = int(sys.stdin.readline())
-    if node_list[q] == 0:
-        print(1)
-    else:
-        
-
-
-
-print(node_list)
+n = int(sys.stdin.readline())
+for _ in range(n):
+    k = int(sys.stdin.readline())
+    vol_dict ={}
+    for _ in range(k):
+        s = sys.stdin.readline().split()
+        if s[1] not in vol_dict.keys():
+            vol_dict[s[1]] = 0
+        vol_dict[s[1]] += 1
+    vol_list = list(vol_dict.values())
+    vol_len = len(vol_list)
+    ret = 1
+    for i in range(vol_len):
+        ret *= vol_list[i] + 1
+    print(ret - 1)
