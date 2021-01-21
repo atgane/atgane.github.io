@@ -1,26 +1,47 @@
 #include<iostream>
+#include<vector>
 int main()
 {
-    int n, memo1 = 0, memo2 = 0, ram = 0;
-    std::cin >> n;
-    for(int i = 0; i < n; ++i)
+    int N;
+    std::vector<int> num_list, stack, return_list;
+    std::cin >> N;
+    for(int i = 0; i < N; ++i)
     {
-        if(i == 0)
+        int tmp;
+        std::cin >> tmp;
+        num_list.push_back(tmp);
+    }
+    stack.push_back(num_list.back());
+    num_list.pop_back();
+    return_list.push_back(-1);
+    while(!num_list.empty())
+    {
+        int tmp = num_list.back();
+        num_list.pop_back();
+        if(tmp >= stack[0])
         {
-            memo2 = 1;
-        }
-        else if(i == 1)
-        {
-            memo2 = 3;
-            memo1 = 1;
+            stack.clear();
+            stack.push_back(tmp);
+            return_list.push_back(-1);
         }
         else
         {
-            ram = memo2 + 2 * memo1;
-            ram %= 10007;
-            memo1 = memo2;
-            memo2 = ram;
+            int l = stack.size();
+            while(true)
+            {
+                if(stack.back() > tmp)
+                {
+                    return_list.push_back(stack.back());
+                    stack.push_back(tmp);
+                    break;
+                }
+                else
+                {stack.pop_back();}
+            }
         }
     }
-    std::cout << memo2;
+    for(int i = 0; i < N; ++i)
+    {
+        std::cout << return_list[N - 1 - i] << " ";
+    }
 }
