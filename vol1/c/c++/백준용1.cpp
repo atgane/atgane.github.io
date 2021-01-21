@@ -1,23 +1,14 @@
 #include<iostream>
-int eu(int a, int b)
-{
-    int r = a % b;
-    if(r == 0)
-    {return b;}
-    else
-    {return eu(b, r);}
-}
 int main()
 {
-    int n;
-    std::cin >> n;
-    for(int i = 0; i < n; ++i)
+    int N, num_list[100], ram;
+    std::cin >> N;
+    for(int i = 0; i < N; ++i)
     {
-        int x, y;
-        std::cin >> x;
-        std::cin >> y;
-        int g = eu(x, y);
-        std::cout << x * y / g << "\n";
+        std::cin >> num_list[i];
     }
-    return 0;
+    for(int i = 0; i < N; ++i)
+    {
+
+    }
 }
