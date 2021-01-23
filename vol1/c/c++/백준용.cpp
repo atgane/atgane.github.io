@@ -1,47 +1,55 @@
 #include<iostream>
 #include<vector>
+#include<stack>
 int main()
 {
     int N;
-    std::vector<int> num_list, stack, return_list;
+    std::stack<int> stack;
+    std::vector<bool> result;
     std::cin >> N;
+    std::vector<bool> data(N + 1, 1);
+    stack.push(0);
+
     for(int i = 0; i < N; ++i)
     {
         int tmp;
         std::cin >> tmp;
-        num_list.push_back(tmp);
-    }
-    stack.push_back(num_list.back());
-    num_list.pop_back();
-    return_list.push_back(-1);
-    while(!num_list.empty())
-    {
-        int tmp = num_list.back();
-        num_list.pop_back();
-        if(tmp >= stack[0])
+        if(tmp > stack.top())
         {
-            stack.clear();
-            stack.push_back(tmp);
-            return_list.push_back(-1);
+            int j;
+            if(stack.size() == 1)
+            {j = 1;}
+            else
+            {j = stack.top();}
+            while(j <= tmp)
+            {
+                if(data[j] == 1)
+                {
+                    data[j] = 0;
+                    stack.push(j);
+                    result.push_back(1);
+                }
+                j += 1;
+            }
+            stack.pop();
+            result.push_back(0);
+        }
+        else if(tmp == stack.top())
+        {
+            stack.pop();
+            result.push_back(0);
         }
         else
         {
-            int l = stack.size();
-            while(true)
-            {
-                if(stack.back() > tmp)
-                {
-                    return_list.push_back(stack.back());
-                    stack.push_back(tmp);
-                    break;
-                }
-                else
-                {stack.pop_back();}
-            }
+            std::cout << "NO";
+            return 0;
         }
     }
-    for(int i = 0; i < N; ++i)
+    for(int i = 0; i < result.size(); ++i)
     {
-        std::cout << return_list[N - 1 - i] << " ";
+        if(result[i] == 1)
+        {std::cout << "+\n";}
+        else
+        {std::cout << "-\n";}
     }
 }

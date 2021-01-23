@@ -1,29 +1,38 @@
 import sys
+from collections import deque
 N = int(sys.stdin.readline())
-num_list = list(map(int, sys.stdin.readline().split()))
-stack = [num_list.pop()]
-return_list = [-1]
-while num_list:
-    tmp = num_list.pop()
-    if tmp > stack[0]:
-        stack = [tmp]
-        return_list.append(-1)
-        max_loc = 0
+M = int(sys.stdin.readline())
+routeList = []
+for i in range(M):
+    tmpList = list(map(int, sys.stdin.readline().split()))
+    if tmpList[1] < tmpList[0]:
+        tmpList.append(i + 1)
+        tmpList[1] += N
+        routeList.append(list(tmpList))
+        tmpList[1] -= N
+        tmpList[0] -= N
+        routeList.append(list(tmpList))
     else:
-        l = len(stack)
-        while True:
-            if stack[-1] >= tmp:
-                return_list.append(stack[-1])
-                stack.append(tmp)
-                break
-            else:
-                stack.pop()
-        
-        # for i in range(1, l + 1):
-        #     if tmp <= stack[-i]:
-        #         return_list.append(stack[-i])
-        #         stack = stack[:l - i + 1] + [tmp]
-        #         break
-return_list.reverse()
-for i in return_list:
-    sys.stdout.writelines(f"{i} ")
+        tmpList.append(i + 1)
+        routeList.append(tmpList)
+routeList.sort(key=lambda x: -x[1])
+routeList.sort(key=lambda x: x[0])
+routeDeque = deque(routeList)
+resultDeque = deque([routeDeque.popleft()])
+lenRouteDeque = len(routeDeque)
+for i in range(lenRouteDeque):
+    tmpList = routeDeque.popleft()
+    if resultDeque[-1][1] >= tmpList[1]:
+        pass
+    else:
+        resultDeque.append(tmpList)
+result = []
+lenResult = len(resultDeque)
+for i in range(lenResult):
+    result.append(resultDeque[i][2])
+result = list(set(result))
+lenResult = len(result)
+result.sort()
+for i in range(lenResult - 1):
+    print(result[i], end=" ")
+print(result[-1])
