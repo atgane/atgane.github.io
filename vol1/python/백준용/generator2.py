@@ -1,5 +1,5 @@
 import random
-n = random.randint(2, 20)
+n = random.randint(2, 10)
 q = random.randint(2, 10)
 print(n, q)
 for i in range(n - 1):
