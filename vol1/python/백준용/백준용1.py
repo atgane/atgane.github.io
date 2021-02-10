@@ -1,20 +1,20 @@
 import sys
-while True:
-    tmp = list(map(int, sys.stdin.readline().split()))
-    if tmp[0] == 0:
-        break
-    max = tmp[0]
-    for i in range(tmp[0]):
-        for j in range(2, tmp[i + 1] + 1):
-            k = 1
-            while True:
-                try:
-                    if j <= tmp[i + k + 1]:
-                        k += 1
-                    else:
-                        break
-                except:
-                    break
-            if k * j > max:
-                max = k * j
-    print(max)
+
+def calc_len(p1, p2):
+    return (p2[0] - p1[0]) ** 2 + (p2[1] - p1[1]) ** 2
+
+N = int(sys.stdin.readline())
+data = []
+for i in range(N):
+    data.append(list(map(int, sys.stdin.readline().split())))
+data.sort(key=lambda x: x[1])
+data.sort(key=lambda x: x[0])
+length = calc_len(data[0], data[1])
+for i in range(N):
+    for j in range(i + 1, N):
+        if abs(data[j][0] - data[i][0]) < length:
+            if abs(data[j][1] - data[i][1]) < length:
+                length = min(length, calc_len(data[i], data[j]))
+        else:
+            break
+print(length)

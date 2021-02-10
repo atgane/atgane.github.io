@@ -1,48 +1,49 @@
 import sys
-sys.setrecursionlimit(200000)
+import math
 
-class Node:
-    def __init__(self, node):
-        self.name = node
-        self.root = None
-        self.child = []
-        self.parent = None
-    def add_parent(self, parent):
-        self.parent = parent
-        parent.child.append(self)
-    def add_child(self, child):
-        self.child.append(child)
-        child.parent = self
-    def del_parent(self):
-        self.root = self
-        self.parent = None
-    def find_root(self):
-        try:
-            if self.root != self:
-                self.root = self.parent.find_root()
-            return self.root
-        except:
-            return self
-    
-def check_path(node1, node2):
-    if node1.root == node2.root:
-        return True
-    return False
+N = int(sys.stdin.readline())
+data = []
+for i in range(N):
+    data.append(list(map(int, sys.stdin.readline().split())))
+data.sort(key=lambda x: x[0])
 
-N, Q = list(map(int, sys.stdin.readline().split()))
-all_node = [Node(i) for i in range(N + 1)]
-all_node[1].root = all_node[1]
-for i in range(2, N + 1):
-    tmp = int(sys.stdin.readline())
-    all_node[i].add_parent(all_node[tmp])
-for i in range(N + Q - 1):
-    tmp = list(map(int, sys.stdin.readline().split()))
-    if tmp[0] == 0:
-        all_node[tmp[1]].del_parent()
-    if tmp[0] == 1:
-        root_node1 = all_node[tmp[1]].find_root()
-        root_node2 = all_node[tmp[2]].find_root()
-        if root_node1 == root_node2:
-            sys.stdout.write('YES\n')
-        else:
-            sys.stdout.write("NO\n")
+def calc_dis(p1, p2):
+    return (p1[0] - p2[0]) ** 2 + (p1[1] - p2[1]) ** 2
+
+def calc_min_len(arr):
+    l_arr = len(arr)
+    if l_arr == 2:
+        return calc_dis(arr[0], arr[1])
+
+    elif l_arr == 3:
+        return min(calc_dis(arr[0], arr[1]), calc_dis(arr[0], arr[2]), calc_dis(arr[1], arr[2]))
+
+    else:
+        left_arr = arr[:l_arr // 2]
+        right_arr = arr[l_arr // 2:]
+        left_len = calc_min_len(left_arr)
+        right_len = calc_min_len(right_arr)
+        min_length = min(left_len, right_len)
+        mid_line = (arr[l_arr // 2 - 1][0] + arr[l_arr // 2][0]) / 2
+        small_arr = []
+
+        for i in range(l_arr):
+            if mid_line - min_length <= arr[i][0] and arr[i][0] <= mid_line + min_length:
+                small_arr.append(arr[i])
+        
+        small_arr.sort(key=lambda x: x[1])
+        l_s_arr = len(small_arr)
+
+        for i in range(l_s_arr):
+            for j in range(i + 1, l_s_arr):
+                dy = (small_arr[i][1] - small_arr[j][1]) ** 2
+                if dy < min_length:
+                    dx = (small_arr[i][0] - small_arr[j][0]) ** 2
+                    if dx < min_length - dy:
+                        min_length = min(min_length, dx + dy)
+                else:
+                    break
+
+        return min_length
+
+print(calc_min_len(data))

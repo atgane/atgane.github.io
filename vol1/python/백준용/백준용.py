@@ -12,6 +12,8 @@ while True:
             tmp_area = 0
             while stack[-1][1] == tmp_list[1]:
                 stack.pop()
+            print(stack, tmp_list)
+            print(i, input_list[i], (i - 1 - stack[-1][0]) * tmp_list[1], (i - tmp_list[0]) * tmp_list[1])
             tmp_area = max((i - 1 - stack[-1][0]) * tmp_list[1], (i - tmp_list[0]) * tmp_list[1])
             if tmp_area > ret:
                 ret = tmp_area

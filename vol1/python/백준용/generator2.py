@@ -1,5 +1,7 @@
 import random
-n = random.randint(3, 30)
-print(n, end=" ")
+#n = random.randint(3, 100)
+n = 300
+k = 100000
+print(n)
 for _ in range(n):
-    print(random.randint(3, 10), end=" ")
+    print(random.randint(-k, k), random.randint(-k, k))
