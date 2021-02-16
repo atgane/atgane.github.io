@@ -22,6 +22,7 @@ int main()
     std::vector<int> root(0, N + 1);
     std::vector<int> parent(0, N + 1);
     root[1] = 1;
+    
     for(int i = 2; i < N + 1; ++i)
     {
         std::cin >> parent[i];
