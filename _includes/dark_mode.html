@@ -1,0 +1,22 @@
+// _includes/dark-mode.html
+<script>
+  (function() {
+    const stored = localStorage.getItem('theme');
+    const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+
+    // 저장된 값 우선, 없으면 OS 설정 따름
+    if (stored === 'dark' || (!stored && prefersDark)) {
+      document.documentElement.setAttribute('data-theme', 'dark');
+    }
+
+    // OS 설정 변경 실시간 감지
+    window.matchMedia('(prefers-color-scheme: dark)')
+      .addEventListener('change', e => {
+        if (!localStorage.getItem('theme')) {
+          document.documentElement.setAttribute(
+            'data-theme', e.matches ? 'dark' : 'light'
+          );
+        }
+      });
+  })();
+</script>

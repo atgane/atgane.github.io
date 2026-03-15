@@ -7,3 +7,14 @@ search: false
 
 @import "minimal-mistakes/skins/{{ site.minimal_mistakes_skin | default: 'default' }}"; // skin
 @import "minimal-mistakes"; // main partials
+
+// OS / JS 다크모드 대응
+[data-theme="dark"] {
+  background-color: #252a34;
+  color: #eaeaea;
+
+  .masthead, .greedy-nav { background-color: #1b1f27; }
+  .page__footer       { background-color: #1b1f27; color: #9a9ea6; }
+  a                   { color: #7eb8f7; }
+  code                { background: #1b1f27; color: #eaeaea; }
+}
