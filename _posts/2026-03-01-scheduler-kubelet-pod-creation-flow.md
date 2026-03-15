@@ -14,6 +14,8 @@ toc: true
 toc_sticky: true
 excerpt: "kubernetes에서 가장 기본적인 동작은 Pod를 처리하는 것입니다. scheduler와 kubelet의 내부 동작을 코드 레벨로 따라갑니다."
 author_profile: true
+header:
+  teaser: /assets/images/posts/kubernetes.png
 ---
 
 kubernetes에서 가장 기본적인 동작은 Pod를 처리하는 것입니다. 사용자가 Pod를 생성할 때 kubernetes는 다음 동작으로 Pod를 생성합니다.

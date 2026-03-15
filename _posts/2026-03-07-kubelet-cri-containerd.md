@@ -15,6 +15,8 @@ toc: true
 toc_sticky: true
 excerpt: "kubelet은 컨테이너 런타임과 직접 결합하지 않고, CRI(Container Runtime Interface)라는 gRPC 기반의 표준 인터페이스를 통해 통신합니다."
 author_profile: true
+header:
+  teaser: /assets/images/posts/kubernetes.png
 ---
 
 kubelet은 컨테이너 런타임과 직접 결합하지 않고, CRI(Container Runtime Interface)라는 gRPC 기반의 표준 인터페이스를 통해 통신합니다. 이 문서는 `SyncPod`가 런타임을 호출하는 지점에서 출발하여, 그 호출이 어떤 인터페이스로 정의되어 있는지, 그리고 kubelet 기동 시 해당 인터페이스 구현체가 어떻게 초기화되고 연결되는지를 코드 레벨로 따라갑니다.
