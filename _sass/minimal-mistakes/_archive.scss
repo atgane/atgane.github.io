@@ -140,10 +140,10 @@
 
   .archive__item-teaser {
     flex-shrink: 0;
-    width: 150px;
+    width: 100px;
 
     @include breakpoint($medium) {
-      width: 200px;
+      width: 140px;
     }
   }
 }
