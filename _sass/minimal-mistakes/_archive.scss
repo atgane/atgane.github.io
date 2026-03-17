@@ -126,6 +126,26 @@
     margin: 0 0 4px;
     font-size: 0.6em;
   }
+
+  .archive__item {
+    display: flex;
+    align-items: flex-start;
+    gap: 1em;
+  }
+
+  .archive__item-body {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .archive__item-teaser {
+    flex-shrink: 0;
+    width: 150px;
+
+    @include breakpoint($medium) {
+      width: 200px;
+    }
+  }
 }
 
 /*
