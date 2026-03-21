@@ -8,6 +8,13 @@ search: false
 @import "minimal-mistakes/skins/{{ site.minimal_mistakes_skin | default: 'default' }}"; // skin
 @import "minimal-mistakes"; // main partials
 
+.site-logo img {
+  width: 2rem;
+  height: 2rem;
+  border-radius: 50%;
+  object-fit: cover;
+}
+
 // OS / JS 다크모드 대응
 [data-theme="dark"] {
   background-color: #252a34;
