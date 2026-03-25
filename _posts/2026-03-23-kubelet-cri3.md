@@ -1,0 +1,728 @@
+---
+title: containerd 내부 동작
+---
+
+지금까지 scheduler, kubelet의 동작을 코드로 살펴봤고 kubelet에서 CRI의 호출 지점과 쉘에서 containerd, shim 프로세스를 살펴봤습니다. shim은 kubelet과 containerd 사이에서 파드의 라이프사이클을 관리하는 역할을 수행함을 알 수 있었습니다. 이번에는 쉘에서 확인한 containerd의 내부 동작을 살펴보도록 하겠습니다.
+
+---
+
+kubelet은 containerd의 gRPC API를 통해 컨테이너 런타임과 상호작용합니다. 이전 아티클에서 kubelet이 CRI를 통해 `RunPodSandbox`, `CreateContainer`, `StartContainer` 등의 메서드를 호출하는 것을 확인했습니다. 이제 containerd가 이러한 요청을 처리하는 과정을 살펴보겠습니다.
+
+containerd는 gRPC 서버로 동작하며, kubelet이 보낸 요청을 처리하기 위해 다양한 메서드를 구현하고 있습니다. 예를 들어, `RunPodSandbox` 요청이 들어오면 containerd는 해당 요청을 처리하기 위해 내부적으로 여러 단계를 거칩니다.
+
+containerd는 기능별 컴포넌트를 **플러그인**으로 분리하고, 플러그인이 `grpcService` 인터페이스를 구현하면 자동으로 gRPC 서버에 등록되는 구조를 가집니다. 이 흐름을 `main()`부터 이미지 RPC 호출까지 단계별로 추적해 보겠습니다.
+
+# 플러그인 사전 등록
+
+[cmd/containerd/main.go](https://github.com/containerd/containerd/blob/v2.2.1/cmd/containerd/main.go)의 `main()`은 단순합니다.
+
+```go
+// cmd/containerd/main.go
+import (
+    _ "github.com/containerd/containerd/v2/cmd/containerd/builtins"
+)
+
+func main() {
+    app := command.App()
+    if err := app.Run(os.Args); err != nil { ... }
+}
+```
+
+핵심은 blank import `_`입니다. Go 런타임은 `main()`이 실행되기 전에 import된 패키지의 `init()` 함수를 모두 실행합니다. [cmd/containerd/builtins/builtins.go](https://github.com/containerd/containerd/blob/v2.2.1/cmd/containerd/builtins/builtins.go)는 containerd가 제공하는 모든 빌트인 플러그인 패키지를 blank import하고 있습니다.
+
+```go
+// cmd/containerd/builtins/builtins.go
+import (
+    _ "github.com/containerd/containerd/v2/plugins/services/images"
+    _ "github.com/containerd/containerd/v2/plugins/services/containers"
+    _ "github.com/containerd/containerd/v2/plugins/services/tasks"
+    // ... 기타 서비스 플러그인들
+)
+```
+
+각 플러그인 패키지의 `init()` 함수가 import 될 때 실행됩니다. 이때 `registry.Register()`를 호출하여 플러그인의 타입, ID, 의존성, 초기화 함수(`InitFn`)를 전역 레지스트리에 등록합니다. 예를 들어 이미지 서비스는 두 개의 플러그인을 등록합니다.
+
+예를 들어 `GRPCPlugin`("images")은 gRPC 게이트웨이 역할을 하며 `ServicePlugin` 의존성을 선언합니다 ([plugins/services/images/service.go#L31](https://github.com/containerd/containerd/blob/v2.2.1/plugins/services/images/service.go#L31)).
+
+```go
+// plugins/services/images/service.go
+func init() {
+    registry.Register(&plugin.Registration{
+        Type: plugins.GRPCPlugin,
+        ID:   "images",
+        Requires: []plugin.Type{
+            plugins.ServicePlugin,
+        },
+        InitFn: func(ic *plugin.InitContext) (interface{}, error) {
+            i, err := ic.GetByID(plugins.ServicePlugin, services.ImagesService)
+            ...
+            return &service{local: i.(imagesapi.ImagesClient)}, nil
+        },
+    })
+}
+```
+
+`ServicePlugin`("images")은 실제 비즈니스 로직을 담당하며 `MetadataPlugin`, `GCPlugin` 등을 의존성으로 선언합니다 ([plugins/services/images/local.go#L45](https://github.com/containerd/containerd/blob/v2.2.1/plugins/services/images/local.go#L45)).
+
+```go
+// plugins/services/images/local.go
+func init() {
+    registry.Register(&plugin.Registration{
+        Type: plugins.ServicePlugin,
+        ID:   services.ImagesService,
+        Requires: []plugin.Type{
+            plugins.MetadataPlugin,
+            plugins.GCPlugin,
+            plugins.WarningPlugin,
+        },
+        InitFn: func(ic *plugin.InitContext) (interface{}, error) {
+            m, _ := ic.GetSingle(plugins.MetadataPlugin)  // bolt DB
+            g, _ := ic.GetSingle(plugins.GCPlugin)
+            ...
+            return &local{
+                store: metadata.NewImageStore(m.(*metadata.DB)),
+                gc:    g.(gcScheduler),
+            }, nil
+        },
+    })
+}
+```
+
+이 시점에서는 인스턴스를 생성하지 않고 `Registration` 구조체만 전역 레지스트리에 저장합니다. 실제 인스턴스 생성(`InitFn` 실행)은 이후 `server.New()` 단계에서 이루어집니다.
+
+
+# 플러그인 로드 및 gRPC 서버 실행
+
+이번은 gRPC 서버가 어떻게 생성되고 플러그인이 초기화되는지 살펴보겠습니다. 이 흐름은 `main()`에서 출발합니다.
+
+```go
+// https://github.com/containerd/containerd/blob/dea7da592f5d1/cmd/containerd/main.go#L28
+func main() {
+    app := command.App() // ✅ cli.App 인스턴스 생성 (app.Action 포함)
+    if err := app.Run(os.Args); err != nil { // ✅ urfave/cli가 인수 파싱 후 app.Action 호출
+        // ...
+    }
+}
+```
+
+`command.App()` 내부에서 데몬 실행 로직을 등록합니다. 이때 서브커맨드가 주어지지 않으면 urfave/cli는 기본 동작으로 등록된 `app.Action` 클로저를 실행합니다.
+
+```go
+// https://github.com/containerd/containerd/blob/dea7da592f5d1/cmd/containerd/command/main.go#L73
+func App() *cli.App {
+    app := cli.NewApp()
+    app.Commands = []*cli.Command{
+        configCommand,
+        publishCommand,
+        ociHook,
+    }
+    app.Action = func(cliContext *cli.Context) error { // ✅ 서브커맨드 없을 때 실행되는 기본 동작
+        // ...
+    }
+    return app
+}
+```
+
+`app.Action` 클로저 본문에서는 설정 로드 → `server.New()` 호출 → 소켓 리스너 생성 → `serve()` 순으로 진행됩니다.
+
+```go
+// https://github.com/containerd/containerd/blob/dea7da592f5d1/cmd/containerd/command/main.go#L121
+func App() *cli.App {
+    // ...
+    app.Action = func(cliContext *cli.Context) error {
+        // ...
+        go func() { // ✅ 고루틴에서 서버 초기화 (bolt DB 잠금 등 장시간 블로킹 방지)
+            server, err := server.New(ctx, config) // ✅ 플러그인 로드 + gRPC 서버 생성
+            // ...
+        }()
+        // ...
+        l, err := sys.GetLocalListener(config.GRPC.Address, config.GRPC.UID, config.GRPC.GID)
+        // ...
+        serve(ctx, l, server.ServeGRPC) // ✅ 별도 고루틴에서 grpcServer.Serve(l) 실행
+    }
+}
+```
+
+`server.New()`는 먼저 `LoadPlugins()`를 호출하여 전역 레지스트리에 등록된 모든 플러그인을 의존성 순서로 정렬된 슬라이스로 반환받습니다.
+
+```go
+// https://github.com/containerd/containerd/blob/dea7da592f5d1/cmd/containerd/server/server.go#L132
+func New(ctx context.Context, config *srvconfig.Config) (*Server, error) {
+    // ...
+    loaded, err := LoadPlugins(ctx, config) // ✅ 위상 정렬된 []plugin.Registration 반환
+    // ...
+}
+```
+
+`LoadPlugins`는 proxy 플러그인을 추가로 등록한 뒤 `registry.Graph()`를 호출합니다.
+
+```go
+// https://github.com/containerd/containerd/blob/dea7da592f5d1/cmd/containerd/server/server.go#L494
+func LoadPlugins(ctx context.Context, config *srvconfig.Config) ([]plugin.Registration, error) {
+    // ... proxy plugin 등록 ...
+    return registry.Graph(filter(config.DisabledPlugins)), nil // ✅ 비활성화 필터 적용 후 위상 정렬
+}
+```
+
+`registry.Graph()`는 DFS 방식으로 각 플러그인의 `Requires` 의존성을 재귀적으로 먼저 삽입하여, 피의존 플러그인이 항상 의존 플러그인보다 앞에 오도록 정렬합니다.
+
+```go
+// https://github.com/containerd/containerd/blob/dea7da592f5d1/vendor/github.com/containerd/plugin/plugin.go#L112
+func (registry Registry) Graph(filter DisableFilter) []Registration {
+    // ...
+    for _, r := range registry {
+        if disabled[r] {
+            continue
+        }
+        children(r, registry, added, disabled, &ordered) // ✅ DFS로 Requires 먼저 삽입
+        if !added[r] {
+            ordered = append(ordered, *r)
+            added[r] = true
+        }
+    }
+    return ordered
+}
+```
+
+## 플러그인 초기화와 의존성 주입
+
+다시 돌아와서 `server.New()`는 위상 정렬된 `loaded`를 순회하며 각 플러그인을 순차적으로 초기화합니다.
+
+```go
+// https://github.com/containerd/containerd/blob/dea7da592f5d1/cmd/containerd/server/server.go#L246
+func New(ctx context.Context, config *srvconfig.Config) (*Server, error) {
+    // ...
+    var (
+        grpcServer  = grpc.NewServer(serverOpts...)  // ✅ gRPC 서버 인스턴스 생성
+        // ...
+        initialized = plugin.NewPluginSet()          // ✅ 초기화 완료 플러그인 집합
+    )
+    for _, p := range loaded { // ✅ 위상 정렬 순서로 순차 초기화
+        // ...
+        initContext := plugin.NewContext(
+            ctx,
+            initialized, // ✅ 이미 초기화된 플러그인만 담긴 집합 전달
+            map[string]string{
+                plugins.PropertyRootDir:      filepath.Join(config.Root, id),
+                plugins.PropertyGRPCAddress:  config.GRPC.Address,
+                plugins.PropertyTTRPCAddress: config.TTRPC.Address, 
+                // ...
+            },
+        )
+        result := p.Init(initContext)    // ✅ InitFn 실행, instance 또는 err 저장
+        initialized.Add(result)          // ✅ 완료 집합에 추가 (이후 플러그인이 참조 가능)
+
+        instance, err := result.Instance()
+        // ...
+        if src, ok := instance.(grpcService); ok { // ✅ grpcService 구현 여부 확인
+            grpcServices = append(grpcServices, src)
+        }
+    }
+}
+```
+
+모든 플러그인 초기화가 완료된 후 `grpcServices`에 수집된 서비스들을 gRPC 서버에 등록합니다.
+
+```go
+// https://github.com/containerd/containerd/blob/dea7da592f5d1/cmd/containerd/server/server.go#L359
+func New(ctx context.Context, config *srvconfig.Config) (*Server, error) {
+    // ...
+    for _, service := range grpcServices {
+        if err := service.Register(grpcServer); err != nil { // ✅ gRPC 서버에 RPC 메서드 등록
+            return nil, err
+        }
+    }
+    return s, nil
+}
+```
+
+`service.Register()`는 예를 들어 이미지 서비스의 경우 내부적으로 `imagesapi.RegisterImagesServer(s, &service{...})`를 호출하여 protobuf로부터 자동 생성된 핸들러를 gRPC 서버에 연결합니다.
+
+이후 `command/main.go`에서 Unix 소켓 리스너를 생성하고 `serve()`를 통해 `grpcServer.Serve(l)`를 고루틴으로 실행합니다.
+
+```go
+// https://github.com/containerd/containerd/blob/dea7da592f5d1/cmd/containerd/command/main.go#L284
+func App() *cli.App {
+    // ...
+    app.Action = func(cliContext *cli.Context) error {
+        // ...
+        l, err := sys.GetLocalListener(config.GRPC.Address, config.GRPC.UID, config.GRPC.GID)
+        // ...
+        serve(ctx, l, server.ServeGRPC) // ✅ 고루틴에서 grpcServer.Serve(l) 실행
+        // ...
+    }
+}
+```
+
+이로써 containerd는 소켓 파일(`/run/containerd/containerd.sock`)에서 gRPC 요청을 수신할 준비가 완료됩니다. kubelet이 CRI 요청을 보내면 해당 소켓을 통해 등록된 핸들러로 라우팅됩니다.
+
+지금까지의 흐름을 정리하면 다음과 같습니다.
+
+1. blank import → 각 플러그인 패키지의 `init()` 실행 → `registry.Register()`로 타입·ID·`InitFn`을 전역 레지스트리에 등록합니다.
+2. `server.New()` → `LoadPlugins()` → `registry.Graph()`로 의존 관계를 DFS 위상 정렬하여 `[]Registration` 슬라이스를 얻습니다.
+3. 정렬된 순서로 `p.Init(initContext)`를 실행하고 결과를 `initialized` 집합에 누적합니다. `grpcService`를 구현한 인스턴스는 `grpcServices`에 수집합니다.
+4. 수집된 서비스마다 `service.Register(grpcServer)`를 호출하여 protobuf 핸들러를 gRPC 서버에 연결합니다.
+5. Unix 소켓에서 `grpcServer.Serve(l)`를 실행하여 kubelet 요청을 수신합니다.
+
+앞서 이미지 서비스(`GRPCPlugin "images"`)를 예시로 플러그인 등록 메커니즘을 살펴봤습니다. kubelet의 파드 생성 요청인 `RunPodSandbox`, `CreateContainer`, `StartContainer`도 마찬가지로 플러그인으로 등록된 핸들러가 처리하며, 이를 담당하는 핵심 플러그인이 `GRPCPlugin "cri"`입니다.
+
+`GRPCPlugin "cri"`는 kubelet이 보내는 CRI 요청의 gRPC 진입점 역할을 합니다. 이미지 서비스와 동일한 구조로, 이 플러그인은 gRPC 게이트웨이로서 요청을 수신하고 `Requires`에 선언된 `CRIServicePlugin`과 `PodSandboxPlugin`에 실제 처리를 위임합니다. `GRPCPlugin`이 프로토콜 어댑터라면, `CRIServicePlugin`이 실제 비즈니스 로직을 구현하는 계층입니다.
+
+다음 절에서는 이 구조를 바탕으로 `GRPCPlugin "cri"` 플러그인이 어떻게 등록되고, 세 CRI 메서드가 containerd 내부에서 어떤 단계를 거쳐 처리되는지 추적해 보겠습니다.
+
+# 내부 메서드 흐름
+
+`plugins/cri/cri.go`의 `init()`은 `GRPCPlugin` 타입의 `"cri"` 플러그인을 전역 레지스트리에 등록합니다.
+
+```go
+// https://github.com/containerd/containerd/blob/v2.2.1/plugins/cri/cri.go#L44
+func init() {
+    registry.Register(&plugin.Registration{
+        Type: plugins.GRPCPlugin,
+        ID:   "cri",           // ✅ 이미지 서비스와 동일한 GRPCPlugin 타입으로 등록
+        Requires: []plugin.Type{
+            plugins.CRIServicePlugin,
+            plugins.PodSandboxPlugin,
+            // ...
+        },
+        InitFn: initCRIService,
+    })
+}
+```
+
+`server.New()`에서 초기화 수행 시 `InitFn`인 `initCRIService`가 실행됩니다. 이 함수는 `CRIServicePlugin`에서 런타임/이미지 서비스를 꺼내 조립한 뒤, 마지막에 `&criGRPCServer{...}`를 생성하여 반환합니다.
+
+```go
+// https://github.com/containerd/containerd/blob/dea7da592f5d1/plugins/cri/cri.go#L141
+func initCRIService(ic *plugin.InitContext) (interface{}, error) {
+    // ...
+    service := &criGRPCServer{               // ✅ grpcService 인터페이스를 구현하는 구조체 생성
+        RuntimeServiceServer: rs,
+        ImageServiceServer:   is,
+        // ...
+    }
+    // ...
+    return criGRPCServerWithTCP{service}, nil // ✅ InitFn의 반환값이 plugin instance가 됨
+}
+```
+
+`server.New()`는 앞서 살펴본 대로 반환된 인스턴스가 `grpcService`(`Register` 메서드)를 구현하는지 확인하고, 구현한다면 `grpcServices` 슬라이스에 수집합니다. 모든 플러그인 초기화가 끝난 뒤 `service.Register(grpcServer)`를 호출하여 CRI 핸들러를 gRPC 서버에 연결합니다.
+
+```go
+// https://github.com/containerd/containerd/blob/v2.2.1/plugins/cri/cri.go#L179
+func (c *criGRPCServer) Register(s *grpc.Server) error {
+    instrumented := instrument.NewService(c)
+    runtime.RegisterRuntimeServiceServer(s, instrumented) // ✅ CRI RuntimeService 핸들러 등록
+    runtime.RegisterImageServiceServer(s, instrumented)
+    return nil
+}
+```
+
+이제 kubelet이 파드를 생성할 때 실제로 호출하는 세 메서드가 containerd 내부에서 어떻게 처리되는지 살펴보겠습니다.
+
+## RunPodSandbox
+
+`RunPodSandbox`는 파드 수준의 샌드박스를 생성하고 시작하는 메서드입니다. 샌드박스는 파드 내의 모든 컨테이너가 공유하는 네트워크/IPC 네임스페이스의 기준점 역할을 하며, 흔히 `pause` 컨테이너라고 불립니다.
+
+구현은 `internal/cri/server/sandbox_run.go`의 `criService.RunPodSandbox`에 있으며, 단계별로 살펴보면 다음과 같습니다.
+
+### 샌드박스 ID 예약과 메타데이터 생성
+
+```go
+// https://github.com/containerd/containerd/blob/v2.2.1/internal/cri/server/sandbox_run.go#L51
+func (c *criService) RunPodSandbox(ctx context.Context, r *runtime.RunPodSandboxRequest) (_ *runtime.RunPodSandboxResponse, retErr error) {
+    // ...
+    id := util.GenerateID()    // ✅ UUID 기반의 고유 샌드박스 ID 생성
+    name := makeSandboxName(metadata)
+
+    if err := c.sandboxNameIndex.Reserve(name, id); err != nil { // ✅ 이름 중복 방지를 위한 예약
+        return nil, fmt.Errorf("failed to reserve sandbox name %q: %w", name, err)
+    }
+
+    // ...
+    ls, lerr := leaseSvc.Create(ctx, leases.WithID(id)) // ✅ 리소스 누락 방지를 위한 lease 생성
+
+    // ...
+    ociRuntime, err := c.config.GetSandboxRuntime(config, r.GetRuntimeHandler()) // ✅ runtimeClass에 따른 OCI 런타임 결정
+
+    // ...
+    sandbox := sandboxstore.NewSandbox(
+        sandboxstore.Metadata{
+            ID:             id,
+            Name:           name,
+            Config:         config,
+            RuntimeHandler: r.GetRuntimeHandler(),
+        },
+        sandboxstore.Status{State: sandboxstore.StateUnknown, ...},
+    )
+    // ✅ 내부 샌드박스 객체를 생성하고 sandbox store에 저장
+    if _, err := c.client.SandboxStore().Create(ctx, sandboxInfo); err != nil { ... }
+```
+
+### 네트워크 네임스페이스 생성과 CNI 설정
+
+호스트 네트워크를 사용하지 않는 경우, `netns.NewNetNS()`로 새로운 Linux 네트워크 네임스페이스를 생성한 뒤 CNI 플러그인을 실행합니다.
+
+```go
+// https://github.com/containerd/containerd/blob/v2.2.1/internal/cri/server/sandbox_run.go#L195
+func (c *criService) RunPodSandbox(...) {
+    // ...
+    if !hostNetwork(config) {
+        sandbox.NetNS, err = netns.NewNetNS(netnsMountDir) // ✅ /var/run/netns 하위에 netns 바인드 마운트 생성
+        sandbox.NetNSPath = sandbox.NetNS.GetPath()
+
+        // ...
+        if err := c.setupPodNetwork(ctx, &sandbox); err != nil { // ✅ CNI Add 호출 → 가상 이더넷과 IP 할당
+            return nil, fmt.Errorf("failed to setup network for sandbox %q: %w", id, err)
+        }
+    }
+```
+
+### 샌드박스 컨테이너 생성 및 시작
+
+`criService`의 `RunPodSandbox`는 `sandboxService`의 `CreateSandbox`와 `StartSandbox`를 차례로 호출하여 샌드박스 컨테이너를 생성하고 실행합니다.
+
+```go
+// https://github.com/containerd/containerd/blob/v2.2.1/internal/cri/server/sandbox_run.go#L278
+func (c *criService) RunPodSandbox(...) {
+    // ...
+    if err := c.sandboxService.CreateSandbox(ctx, sandboxInfo, ...); err != nil { // ✅ Controller.Create: 메타데이터를 store에 저장
+        return nil, fmt.Errorf("failed to create sandbox %q: %w", id, err)
+    }
+
+    ctrl, err := c.sandboxService.StartSandbox(ctx, sandbox.Sandboxer, id) // ✅ Controller.Start: pause 컨테이너 task 실행
+```
+
+여기서 `sandboxService`의 실체는 `criSandboxService`입니다. 이 구조체는 직접 실행 로직을 담지 않으며, `sandboxer` 문자열을 키로 `sandbox.Controller` 구현체들을 관리하는 디스패처 역할을 합니다.
+
+```go
+// https://github.com/containerd/containerd/blob/dea7da592f5d1/internal/cri/server/sandbox_service.go#L31
+type criSandboxService struct {
+    sandboxControllers map[string]sandbox.Controller // ✅ sandboxer 이름 → Controller 구현체 매핑
+    config             *criconfig.Config
+}
+
+func (c *criSandboxService) SandboxController(sandboxer string) (sandbox.Controller, error) {
+    sbController, ok := c.sandboxControllers[sandboxer] // ✅ sandboxer 값으로 Controller 조회
+    if !ok {
+        return nil, fmt.Errorf("failed to get sandbox controller by %s", sandboxer)
+    }
+    return sbController, nil
+}
+
+func (c *criSandboxService) CreateSandbox(ctx context.Context, info sandbox.Sandbox, opts ...sandbox.CreateOpt) error {
+    ctrl, err := c.SandboxController(info.Sandboxer) // ✅ sandboxer로 Controller를 찾아 위임
+    // ...
+    return ctrl.Create(ctx, info, opts...)
+}
+```
+
+`sandbox.Controller`는 `core/sandbox/controller.go`에 정의된 인터페이스입니다. `Create`, `Start`, `Stop`, `Wait` 등 샌드박스의 전체 생명주기를 추상화합니다.
+
+```go
+// https://github.com/containerd/containerd/blob/dea7da592f5d1/core/sandbox/controller.go#L95
+type Controller interface {
+    // ✅ 샌드박스 환경(마운트 등) 초기화
+    Create(ctx context.Context, sandboxInfo Sandbox, opts ...CreateOpt) error
+    // ✅ 이미 생성된 샌드박스를 실제로 시작
+    Start(ctx context.Context, sandboxID string) (ControllerInstance, error)
+    Stop(ctx context.Context, sandboxID string, opts ...StopOpt) error
+    Wait(ctx context.Context, sandboxID string) (ExitStatus, error)
+    Status(ctx context.Context, sandboxID string, verbose bool) (ControllerStatus, error)
+    Shutdown(ctx context.Context, sandboxID string) error
+    // ...
+}
+```
+
+`sandboxer` 값은 런타임 클래스 설정에 따라 결정되며, 기본값은 `"podsandbox"`입니다. containerd는 두 가지 구현체를 제공합니다.
+
+- `"podsandbox"` — `internal/cri/server/podsandbox.Controller`. containerd 내부에서 pause 컨테이너를 Task로 직접 관리합니다. 일반 Linux 컨테이너 런타임의 기본 경로입니다.
+- `"shim"` — shim이 `SandboxService` 인터페이스를 직접 구현하는 경우에 사용합니다. Kata Containers처럼 VM 기반 런타임에서 shim이 sandbox 생명주기 전체를 책임지는 형태입니다.
+
+`podsandbox.Controller`는 `sandbox.Controller` 인터페이스를 구현하는 구조체로, `var _ sandbox.Controller = (*Controller)(nil)` 컴파일 타임 검증을 포함합니다.
+
+```go
+// https://github.com/containerd/containerd/blob/dea7da592f5d1/internal/cri/server/podsandbox/controller.go#L129
+type Controller struct {
+    config         criconfig.Config
+    client         *containerd.Client  // ✅ containerd 클라이언트 (Container/Task API 접근)
+    runtimeService RuntimeService
+    imageService   ImageService
+    os             osinterface.OS
+    eventMonitor   *events.EventMonitor
+    store          *Store              // ✅ 인메모리 PodSandbox 상태 저장소
+}
+
+var _ sandbox.Controller = (*Controller)(nil) // ✅ 컴파일 타임 인터페이스 구현 검증
+```
+
+이 계층 구조를 정리하면 다음과 같습니다.
+
+```mermaid
+flowchart TD
+    A["criService.RunPodSandbox"]
+    B["sandboxService (criSandboxService) 디스패처: sandboxer 키로 라우팅"]
+    C["sandbox.Controller 인터페이스 (core/sandbox/controller.go)"]
+    D["podsandbox.Controller 기본 구현: Task 기반 pause 컨테이너"]
+    E["shim Controller VM 런타임용: shim이 직접 구현"]
+
+    A --> B --> C --> D
+    C --> E
+```
+
+`Controller.Start` 내부 (`internal/cri/server/podsandbox/sandbox_run.go`)에서는 sandbox 이미지 확인, OCI 스펙 생성, containerd Container와 Task 생성, `task.Start()` 호출까지 진행됩니다.
+
+```go
+// https://github.com/containerd/containerd/blob/v2.2.1/internal/cri/server/podsandbox/sandbox_run.go#L63
+func (c *Controller) Start(ctx context.Context, id string) (cin sandbox.ControllerInstance, retErr error) {
+    // ...
+    image, err := c.ensureImageExists(ctx, sandboxImage, config, ...) // ✅ pause 이미지 pull (없는 경우)
+
+    spec, err := c.sandboxContainerSpec(id, config, ...) // ✅ OCI 런타임 스펙 생성
+
+    container, err := c.client.NewContainer(ctx, id, opts...) // ✅ containerd Container 객체 생성 + 스냅샷 준비
+
+    task, err := container.NewTask(ctx, containerdio.NullIO, taskOpts...) // ✅ shim 프로세스 기동 + OCI 번들 준비
+
+    if err := task.Start(ctx); err != nil { // ✅ pause 프로세스 실제 실행 (runc create → runc start)
+        return cin, fmt.Errorf("failed to start sandbox container task %q: %w", id, err)
+    }
+```
+
+### NRI 훅과 샌드박스 상태 완료
+
+`task.Start()`가 완료되면 실행 흐름은 `podsandbox.Controller.Start`에서 `criService.RunPodSandbox`로 되돌아옵니다. pause 컨테이너는 이미 실행 중이지만, 샌드박스를 Ready 상태로 전환하기 전에 NRI 훅을 먼저 실행합니다.
+
+컨테이너를 실행할 때 파드 스펙에 담기지 않는 노드 수준의 조정이 필요한 경우가 있습니다. CPU 토폴로지 핀닝이나 NUMA 정렬처럼, 노드의 하드웨어 레이아웃을 알아야만 결정할 수 있는 리소스 설정들입니다. 이런 작업은 kubelet도 shim도 담당하기 어렵습니다. kubelet은 파드 스펙과 스케줄링 결과만 알고 하드웨어 세부 정보에는 관여하지 않으며, shim은 개별 컨테이너 하나의 생명주기만 전담하는 격리된 프로세스여서 같은 노드의 다른 컨테이너를 볼 수 없습니다.
+
+NRI(Node Resource Interface)는 이를 위해 설계된 인터페이스입니다. containerd는 노드 위의 모든 컨테이너와 샌드박스를 관리하는 단일 데몬으로, 이 조정을 수행할 수 있는 유일한 위치입니다. NRI는 별도 프로세스로 동작하는 외부 플러그인이 OCI 스펙이 확정된 직후, 실제 runc 실행 직전 시점에 개입할 수 있도록 정의된 인터페이스로, CPU 토폴로지 핀닝, NUMA 정렬, 커스텀 디바이스 설정 등을 담당합니다.
+
+`c.nri.RunPodSandbox()`는 이 시점에 등록된 모든 NRI 플러그인의 `RunPodSandbox` 훅을 순서대로 호출합니다.
+
+훅이 완료되면 샌드박스 상태를 Ready로 전환하고, 인메모리 store에 등록한 뒤, 프로세스 종료를 감시하는 고루틴을 시작하고 kubelet에 응답을 반환합니다.
+
+```go
+// https://github.com/containerd/containerd/blob/v2.2.1/internal/cri/server/sandbox_run.go#L323
+func (c *criService) RunPodSandbox(...) {
+    // ...
+    err = c.nri.RunPodSandbox(ctx, &sandbox) // ✅ NRI 플러그인 훅 실행 (리소스 조정 등 개입 가능)
+
+    if err := sandbox.Status.Update(func(status sandboxstore.Status) (sandboxstore.Status, error) {
+        status.Pid = ctrl.Pid
+        status.State = sandboxstore.StateReady // ✅ 상태를 Ready로 전환
+        status.CreatedAt = ctrl.CreatedAt
+        return status, nil
+    }); err != nil { ... }
+
+    if err := c.sandboxStore.Add(sandbox); err != nil { ... } // ✅ 샌드박스를 인메모리 store에 추가
+
+    c.generateAndSendContainerEvent(ctx, id, id, runtime.ContainerEventType_CONTAINER_CREATED_EVENT)
+
+    exitCh, err := c.sandboxService.WaitSandbox(...)             // ✅ 종료 이벤트 채널 등록
+    c.startSandboxExitMonitor(context.Background(), id, exitCh)   // ✅ 종료 모니터 고루틴 시작
+
+    c.generateAndSendContainerEvent(ctx, id, id, runtime.ContainerEventType_CONTAINER_STARTED_EVENT)
+
+    return &runtime.RunPodSandboxResponse{PodSandboxId: id}, nil // ✅ 샌드박스 ID를 kubelet에 반환
+```
+
+## CreateContainer
+
+`CreateContainer`는 이미 실행 중인 샌드박스에 컨테이너를 추가하는 메서드입니다. 이 단계에서는 프로세스를 아직 실행하지 않으며, 이미지 스냅샷과 OCI 스펙, IO 파이프 등 실행에 필요한 리소스만 준비합니다.
+
+구현은 `internal/cri/server/container_create.go`의 `criService.CreateContainer`에 있습니다.
+
+### 샌드박스 조회와 컨테이너 ID 예약
+
+먼저 요청에 담긴 샌드박스 ID로 인메모리 store를 조회하여 이미 실행 중인 샌드박스를 가져옵니다. 이 시점에서 샌드박스의 pause 프로세스 PID를 읽어두는데, 이후 net/IPC/UTS 네임스페이스 공유 경로(`/proc/<pid>/ns/...`)를 구성할 때 반드시 필요하기 때문입니다. 그 다음 컨테이너 ID를 생성하고 이름 충돌을 방지하기 위해 이름 인덱스에 예약합니다.
+
+```go
+// https://github.com/containerd/containerd/blob/v2.2.1/internal/cri/server/container_create.go#L57
+func (c *criService) CreateContainer(ctx context.Context, r *runtime.CreateContainerRequest) (_ *runtime.CreateContainerResponse, retErr error) {
+    // ...
+    sandbox, err := c.sandboxStore.Get(r.GetPodSandboxId()) // ✅ 인메모리 store에서 샌드박스 조회
+
+    cstatus, err := c.sandboxService.SandboxStatus(ctx, sandbox.Sandboxer, sandbox.ID, false)
+    sandboxPid = cstatus.Pid                                // ✅ net/IPC/UTS 네임스페이스 공유에 항상 사용 (PID ns는 shareProcessNamespace 설정 시 조건부 공유)
+
+    id := util.GenerateID()
+    if err = c.containerNameIndex.Reserve(name, id); err != nil { // ✅ 컨테이너 이름 중복 방지 예약
+        return nil, fmt.Errorf("failed to reserve container name %q: %w", name, err)
+    }
+```
+
+### 이미지 해석과 스냅샷 생성
+
+컨테이너 스펙에 명시된 이미지 레퍼런스를 로컬 이미지 store에서 해석하고 containerd Image 객체로 변환합니다. 이 이미지 객체와 샌드박스 PID, netns 경로를 묶어 `createContainer`로 넘깁니다. `createContainer` 내부에서는 OCI 스펙 생성 → IO FIFO 파이프 초기화 → overlay 스냅샷 생성 → `NewContainer` 호출 순으로 진행됩니다. 이 중 `NewContainer`가 `ContainerService().Create()`를 호출하여 spec을 포함한 컨테이너 메타데이터를 bolt DB에 트랜잭션으로 영구 저장합니다. `/run` 하위의 `config.json`은 이 시점이 아니라 `StartContainer`의 `NewTask → NewBundle` 단계에서 bolt DB를 읽어 파일로 내립니다.
+
+```go
+// https://github.com/containerd/containerd/blob/v2.2.1/internal/cri/server/container_create.go#L167
+func (c *criService) CreateContainer(...) {
+    // ...
+    image, err := c.LocalResolve(config.GetImage().GetImage()) // ✅ 로컬 이미지 store에서 이미지 해석
+    containerdImage, err := c.toContainerdImage(ctx, image)    // ✅ containerd Image 객체로 변환
+
+    _, err = c.createContainer(
+        &createContainerRequest{
+            containerdImage: &containerdImage,
+            sandboxPid:      sandboxPid,
+            NetNSPath:       sandbox.NetNSPath, // ✅ 샌드박스의 netns 경로 전달 (네임스페이스 공유)
+            // ...
+        },
+    )
+```
+
+`createContainer` 내부에서는 OCI 스펙 생성, IO 파이프 초기화, containerd Container 생성까지 진행합니다.
+
+```go
+// https://github.com/containerd/containerd/blob/v2.2.1/internal/cri/server/container_create.go#L222
+func (c *criService) createContainer(r *createContainerRequest) (_ string, retErr error) {
+    // ...
+    spec, err := c.buildContainerSpec(           // ✅ OCI 런타임 스펙 생성 - 결과는 메모리 상의 Go 구조체
+        platform, r.containerID, r.sandboxID, r.sandboxPid, r.NetNSPath, ...,
+    )
+
+    // ...
+    containerIO, err = cio.NewContainerIO(r.containerID,
+        cio.WithNewFIFOs(volatileContainerRootDir, ...)) // ✅ stdout/stderr FIFO 파이프 생성
+
+    opts := []containerd.NewContainerOpts{
+        containerd.WithSnapshotter(c.RuntimeSnapshotter(r.ctx, ociRuntime)),
+        customopts.WithNewSnapshot(r.containerID, *r.containerdImage, ...), // ✅ 이미지 레이어 위에 쓰기 가능 레이어(overlay) 생성
+        containerd.WithSpec(spec, specOpts...),  // ✅ spec을 proto로 마샬링하여 container.Spec 필드에 할당 (아직 메모리)
+        containerd.WithRuntime(runtimeName, runtimeOption),
+        containerd.WithSandbox(r.sandboxID),
+    }
+
+    cntr, err = c.client.NewContainer(r.ctx, r.containerID, opts...)
+    // ✅ ContainerService().Create() → bolt DB 트랜잭션으로 spec 포함 컨테이너 메타데이터 영구 저장
+```
+
+### 컨테이너 store 등록과 이벤트 발송
+
+`NewContainer`로 bolt DB에 저장된 컨테이너 객체를 인메모리 container store에도 등록하여 이후 `StartContainer`에서 빠르게 조회할 수 있도록 합니다. 등록 후에는 `CONTAINER_CREATED` 이벤트를 발송하고 NRI post-create 훅을 실행합니다. 이 시점까지 컨테이너 프로세스는 생성되지 않으며, 실제 실행은 kubelet이 `StartContainer`를 호출할 때 이루어집니다.
+
+```go
+// https://github.com/containerd/containerd/blob/v2.2.1/internal/cri/server/container_create.go#L461
+func (c *criService) createContainer(r *createContainerRequest) (_ string, retErr error) {
+    // ...
+    container, err := containerstore.NewContainer(*r.meta,
+        containerstore.WithStatus(status, containerRootDir),
+        containerstore.WithContainer(cntr),
+        containerstore.WithContainerIO(containerIO),
+    )
+
+    if err := c.containerStore.Add(container); err != nil { ... } // ✅ 인메모리 container store에 추가
+
+    c.generateAndSendContainerEvent(r.ctx, r.containerID, r.sandboxID,
+        runtime.ContainerEventType_CONTAINER_CREATED_EVENT)      // ✅ CONTAINER_CREATED 이벤트 발송
+
+    err = c.nri.PostCreateContainer(r.ctx, r.sandbox, &container) // ✅ NRI post-create 훅 실행
+
+    return containerRootDir, nil
+    // ✅ 프로세스는 아직 실행되지 않음 - StartContainer 호출을 대기
+```
+
+## StartContainer
+
+`StartContainer`는 `CreateContainer`에서 준비된 컨테이너를 실제로 실행하는 메서드입니다. containerd task를 생성하여 shim을 통해 runc에 컨테이너 프로세스를 기동하도록 요청합니다.
+
+구현은 `internal/cri/server/container_start.go`의 `criService.StartContainer`에 있습니다.
+
+### 상태 검증과 IO 로거 설정
+
+`StartContainer`가 호출되면 가장 먼저 컨테이너가 올바른 상태인지 검증합니다. `setContainerStarting`은 컨테이너가 `CONTAINER_CREATED` 상태일 때만 Starting 플래그를 설정하며, 이미 실행 중이거나 종료된 컨테이너에 대한 중복 호출을 원천 차단합니다. 이와 함께 샌드박스가 아직 `StateReady`인지도 확인합니다. pause 컨테이너가 종료된 뒤에는 네트워크 네임스페이스가 사라지므로, 새 컨테이너를 그 네임스페이스에 합류시키는 것이 불가능하기 때문입니다.
+
+상태 검증이 끝나면 IO 로거를 준비합니다. `CreateContainer` 단계에서 stdout/stderr FIFO 파이프를 생성해 두었는데, 이 시점에 그 FIFO를 실제 로그 파일과 연결합니다. `createContainerLoggers`는 `meta.LogPath`에 해당하는 로그 파일을 열고, FIFO에서 읽어 파일에 쓰는 리다이렉션 고루틴을 백그라운드에서 시작합니다.
+
+```go
+// https://github.com/containerd/containerd/blob/v2.2.1/internal/cri/server/container_start.go#L45
+func (c *criService) StartContainer(ctx context.Context, r *runtime.StartContainerRequest) (retRes *runtime.StartContainerResponse, retErr error) {
+    // ...
+    cntr, err := c.containerStore.Get(r.GetContainerId()) // ✅ container store에서 조회
+
+    if err := setContainerStarting(cntr); err != nil {    // ✅ CONTAINER_CREATED 상태 검증 + Starting 플래그 설정
+        return nil, fmt.Errorf("failed to set starting state for container %q: %w", id, err)
+    }
+
+    sandbox, err := c.sandboxStore.Get(meta.SandboxID)
+    if sandbox.Status.Get().State != sandboxstore.StateReady { // ✅ 샌드박스가 Ready 상태인지 확인
+        return nil, fmt.Errorf("sandbox container %q is not running", sandboxID)
+    }
+
+    ioCreation := func(id string) (_ containerdio.IO, err error) {
+        stdoutWC, stderrWC, err := c.createContainerLoggers(meta.LogPath, config.GetTty())
+        // ✅ 로그 파일 오픈 + FIFO → 로그 파일 리다이렉션 고루틴 시작
+        cntr.IO.AddOutput("log", stdoutWC, stderrWC)
+        cntr.IO.Pipe()
+        return cntr.IO, nil
+    }
+```
+
+### Task 생성 — shim 기동과 OCI 번들 준비
+
+`container.NewTask`는 containerd에서 실행 단위인 Task를 생성합니다. 내부적으로는 bolt DB에 저장된 컨테이너 메타데이터(spec 포함)를 읽어 `/run/containerd/io.containerd.runtime.v2.task/<namespace>/<id>/` 하위에 OCI 번들(`config.json`, rootfs 마운트 등)을 구성하고, shim 프로세스를 통해 `runc create`를 실행합니다. 이 단계는 프로세스를 시작하는 것이 아니라 컨테이너 환경(cgroup, 네임스페이스, rootfs)을 초기화하는 단계입니다.
+
+sandbox의 `Endpoint`가 유효하면 별도 shim을 새로 기동하지 않고 기존 샌드박스 shim의 API 엔드포인트를 재사용합니다. Kata Containers처럼 VM 기반 런타임에서는 모든 컨테이너가 같은 VM 위에서 동작해야 하므로, 하나의 shim이 샌드박스 전체의 생명주기를 담당합니다. 일반 runc 환경에서도 같은 파드 내 컨테이너들은 동일한 shim을 공유하여 불필요한 프로세스 생성을 줄입니다.
+
+`task.Wait`는 이 시점에 task 종료 이벤트를 구독하는 채널을 미리 확보합니다. `task.Start` 이후에 Wait를 호출하면 컨테이너가 이미 종료되어 이벤트를 놓칠 수 있기 때문에 순서가 중요합니다.
+
+```go
+// https://github.com/containerd/containerd/blob/v2.2.1/internal/cri/server/container_start.go#L216
+func (c *criService) StartContainer(...) {
+    // ...
+    endpoint := sandbox.Endpoint
+    if endpoint.IsValid() {
+        taskOpts = append(taskOpts,
+            containerd.WithTaskAPIEndpoint(endpoint.Address, endpoint.Version)) // ✅ 샌드박스 shim 재사용 (같은 VM/네임스페이스 공유)
+    }
+
+    task, err := container.NewTask(ctx, ioCreation, taskOpts...)
+    // ✅ containerd → shim API → runc create 순서로 OCI 번들 준비
+    // ✅ shim이 이미 실행 중이면 재사용, 없으면 새로 기동
+
+    exitCh, err := task.Wait(ctrdutil.NamespacedContext()) // ✅ task 종료 이벤트 구독 채널 획득
+```
+
+### NRI 훅 실행과 프로세스 시작
+
+`NewTask`(runc create)까지 완료된 시점은 컨테이너 환경이 완전히 초기화되어 있으나 프로세스는 아직 frozen 상태인 중간 단계입니다. NRI `StartContainer` 훅은 바로 이 틈을 활용합니다. OCI 스펙이 확정된 직후, 실제 프로세스 실행 직전이므로 CPU 핀닝이나 메모리 NUMA 정책처럼 실행 전에 반드시 적용되어야 할 리소스 설정을 이 시점에 주입할 수 있습니다.
+
+훅이 완료되면 `task.Start`로 `runc start`를 호출하여 frozen 상태의 컨테이너 프로세스를 실제로 실행합니다. 이후 PID와 시작 시각을 store에 기록하고, 종료 이벤트를 감시하는 고루틴을 시작합니다. 마지막으로 `CONTAINER_STARTED` 이벤트를 발송하고 NRI post-start 훅을 실행한 뒤 kubelet에 응답을 반환합니다.
+
+```go
+// https://github.com/containerd/containerd/blob/v2.2.1/internal/cri/server/container_start.go#L253
+func (c *criService) StartContainer(...) {
+    // ...
+    err = c.nri.StartContainer(ctx, &sandbox, &cntr) // ✅ NRI start 훅: CPU/메모리 리소스 조정 가능
+
+    if err := task.Start(ctx); err != nil {           // ✅ shim → runc start → 컨테이너 프로세스 실행
+        return nil, fmt.Errorf("failed to start containerd task %q: %w", id, err)
+    }
+
+    if err := cntr.Status.UpdateSync(func(status containerstore.Status) (containerstore.Status, error) {
+        status.Pid = task.Pid()          // ✅ 실행 중인 프로세스의 PID 기록
+        status.StartedAt = time.Now().UnixNano()
+        return status, nil
+    }); err != nil { ... }
+
+    c.startContainerExitMonitor(context.Background(), id, task.Pid(), exitCh) // ✅ 종료 모니터 고루틴 시작
+
+    c.generateAndSendContainerEvent(ctx, id, sandboxID,
+        runtime.ContainerEventType_CONTAINER_STARTED_EVENT)    // ✅ CONTAINER_STARTED 이벤트 발송
+
+    err = c.nri.PostStartContainer(ctx, &sandbox, &cntr)       // ✅ NRI post-start 훅
+
+    return &runtime.StartContainerResponse{}, nil
+```
+
+## 세 메서드의 흐름 요약
+
+kubelet이 파드를 생성할 때 CRI를 통해 다음 순서로 메서드를 호출합니다.
+
+1. `RunPodSandbox` — 네트워크 네임스페이스와 pause 컨테이너를 생성·실행합니다. 이후 모든 컨테이너는 이 샌드박스의 netns/IPC 네임스페이스를 공유합니다.
+2. `CreateContainer` — 각 컨테이너에 대해 OCI 스펙, 이미지 스냅샷(overlay), IO FIFO를 준비하지만 프로세스를 시작하지는 않습니다.
+3. `StartContainer` — containerd task를 생성하고 shim을 통해 `runc create → runc start`를 실행하여 컨테이너 프로세스를 실제로 기동합니다.
+
+각 단계에서 NRI 훅이 실행되어 외부 플러그인이 리소스나 스펙을 조정할 수 있으며, 모든 상태 변화는 containerd의 인메모리 store와 bolt DB에 기록됩니다.
+
