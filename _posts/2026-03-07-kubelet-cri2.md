@@ -1,5 +1,5 @@
 ---
-title: "kubelet과 CRI의 상호작용(containerd를 예시로)"
+title: "kubernetes worker: kubelet과 CRI의 상호작용(containerd를 예시로)"
 date: 2026-03-07 00:00:00 +0900
 categories:
   - Infra
