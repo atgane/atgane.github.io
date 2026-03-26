@@ -378,6 +378,120 @@ func (c *criService) RunPodSandbox(...) {
     }
 ```
 
+#### netns.NewNetNS 내부 동작
+
+`netns.NewNetNS()`는 `pkg/netns/netns_linux.go`에 구현되어 있습니다. `NewNetNS` → `NewNetNSFromPID` → `newNS` 순으로 호출되며, 마지막 `newNS()`가 실제 네트워크 네임스페이스를 생성하고 바인드 마운트합니다.
+
+```go
+// https://github.com/containerd/containerd/blob/dea7da592f5d1/pkg/netns/netns_linux.go#L183
+func NewNetNS(baseDir string) (*NetNS, error) {
+    return NewNetNSFromPID(baseDir, 0) // ✅ pid=0: 새 netns를 생성 (기존 프로세스의 netns를 가져오는 경우 pid를 전달)
+}
+
+func NewNetNSFromPID(baseDir string, pid uint32) (*NetNS, error) {
+    path, err := newNS(baseDir, pid) // ✅ 실제 netns 생성 및 바인드 마운트 수행
+    if err != nil {
+        return nil, fmt.Errorf("failed to setup netns: %w", err)
+    }
+    return &NetNS{path: path}, nil
+}
+```
+
+`newNS()` 내부에서는 전용 OS 스레드를 잠근 고루틴 안에서 커널 시스템 콜로 네임스페이스를 생성하고, 그 결과를 파일시스템에 바인드 마운트합니다.
+
+```go
+// https://github.com/containerd/containerd/blob/dea7da592f5d1/pkg/netns/netns_linux.go#L55
+func newNS(baseDir string, pid uint32) (nsPath string, err error) {
+    // ...
+    nsName := fmt.Sprintf("cni-%x-%x-%x-%x-%x", ...) // ✅ cni-<uuid> 형식의 이름 생성
+    nsPath = path.Join(baseDir, nsName)               // ✅ /var/run/netns/cni-<uuid>
+
+    mountPointFd, err := os.OpenFile(nsPath, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0666) // ✅ 빈 파일을 마운트 포인트로 생성
+
+    // ...
+    go (func() {
+        defer wg.Done()
+        runtime.LockOSThread() // ✅ 이 가상 스레드의 OS 스레드를 고정 (netns는 스레드 단위로 적용)
+
+        origNS, err = cnins.GetNS(getCurrentThreadNetNSPath()) // ✅ 현재 스레드의 netns 저장
+
+        err = unix.Unshare(unix.CLONE_NEWNET) // ✅ 네임스페이스 생성 syscall: 인자로 `CLONE_NEWNET`을 전달하여 새 netns 생성
+
+        defer origNS.Set()
+        // ✅ go1.10+ 에서는 LockOSThread() 후 Unlock 없이 고루틴이 종료되면 런타임이 해당 OS 스레드를 파기하므로
+        //    원래 netns로 복귀할 필요가 없음
+        //    그러나 go1.10 이전에는 LockOSThread()를 해도 스레드가 재사용될 수 있으므로
+        //    이 경우 새 netns가 적용된 스레드를 다른 고루틴이 이어 받게 되는 것을 막기 위해 원래 netns로 복귀
+
+        err = unix.Mount(getCurrentThreadNetNSPath(), nsPath, "none", unix.MS_BIND, "")
+        // ✅ 현재 스레드의 netns(/proc/<pid>/task/<tid>/ns/net)를 파일에 바인드 마운트
+        //    → 스레드가 종료된 뒤에도 netns가 /var/run/netns/cni-<uuid>를 통해 유지됨
+    })()
+    wg.Wait()
+    // ...
+```
+
+`CLONE_NEWNET`으로 생성된 netns는 스레드가 사라지면 소멸되지만, 바인드 마운트를 통해 파일시스템 경로를 유지함으로써 pause 프로세스가 진입하기 전까지 netns가 살아있게 됩니다.
+
+#### setupPodNetwork와 CNI 호출
+
+netns 파일 경로가 준비되면 `setupPodNetwork()`가 CNI 플러그인을 실행합니다.
+
+```go
+// https://github.com/containerd/containerd/blob/dea7da592f5d1/internal/cri/server/sandbox_run.go#L394
+func (c *criService) setupPodNetwork(ctx context.Context, sandbox *sandboxstore.Sandbox) error {
+    var (
+        id        = sandbox.ID
+        path      = sandbox.NetNSPath  // ✅ /var/run/netns/cni-<uuid> 경로
+        netPlugin = c.getNetworkPlugin(sandbox.RuntimeHandler) // ✅ 런타임 클래스별 CNI 인스턴스 조회
+        // ...
+    )
+    // ...
+    opts, err := cniNamespaceOpts(id, config) // ✅ 파드 어노테이션·DNS 설정 등을 CNI args로 변환
+
+    if c.config.CniConfig.NetworkPluginSetupSerially {
+        result, err = netPlugin.SetupSerially(ctx, id, path, opts...) // ✅ CNI 플러그인을 직렬로 순차 실행
+    } else {
+        result, err = netPlugin.Setup(ctx, id, path, opts...)          // ✅ CNI 플러그인을 병렬로 실행
+    }
+    // ...
+    if configs, ok := result.Interfaces[defaultIfName]; ok && len(configs.IPConfigs) > 0 {
+        sandbox.IP, sandbox.AdditionalIPs = selectPodIPs(ctx, configs.IPConfigs, ...) // ✅ 할당된 IP를 sandbox 객체에 캐싱
+        sandbox.CNIResult = result
+    }
+}
+```
+
+`netPlugin.Setup()`은 [go-cni](https://github.com/containerd/go-cni) 라이브러리를 통해 `/etc/cni/net.d/` 설정 파일에 정의된 CNI 플러그인 체인을 순서대로 exec합니다. 기본 구성은 `bridge` → `host-local` → `loopback` 순이며, 각 플러그인은 다음을 수행합니다.
+
+- `bridge`: `cni0` 브리지에 veth pair를 생성하고 한쪽 끝을 netns 안으로 이동
+- `host-local`: IPAM으로 파드 IP를 할당하고 라우팅 규칙 추가
+- `loopback`: netns 내부의 lo 인터페이스를 UP 상태로 전환
+
+```mermaid
+sequenceDiagram
+    participant R as RunPodSandbox
+    participant N as netns.newNS
+    participant K as Linux Kernel
+    participant F as Filesystem
+    participant C as CNI plugins
+
+    R->>N: NewNetNS("/var/run/netns")
+    N->>N: OpenFile("/var/run/netns/cni-uuid") 마운트 포인트 생성
+    N->>N: goroutine + LockOSThread()
+    N->>K: unix.Unshare(CLONE_NEWNET)
+    Note over K: 새 netns를 현재 OS 스레드에 적용
+    N->>F: unix.Mount(/proc/pid/task/tid/ns/net → /var/run/netns/cni-uuid, MS_BIND)
+    Note over F: 스레드 종료 후에도 netns가 경로로 유지됨
+    N-->>R: NetNS{path: "/var/run/netns/cni-uuid"}
+
+    R->>C: setupPodNetwork() → netPlugin.Setup(id, path)
+    C->>K: bridge: veth pair 생성, 한쪽을 netns 안으로 이동
+    C->>K: host-local: IP 할당, 라우팅 규칙 추가
+    C->>K: loopback: lo 인터페이스 UP
+    C-->>R: CNIResult{IP: "10.x.x.x", ...}
+```
+
 ### 샌드박스 컨테이너 생성 및 시작
 
 `criService`의 `RunPodSandbox`는 `sandboxService`의 `CreateSandbox`와 `StartSandbox`를 차례로 호출하여 샌드박스 컨테이너를 생성하고 실행합니다.
@@ -487,6 +601,172 @@ func (c *Controller) Start(ctx context.Context, id string) (cin sandbox.Controll
     if err := task.Start(ctx); err != nil { // ✅ pause 프로세스 실제 실행 (runc create → runc start)
         return cin, fmt.Errorf("failed to start sandbox container task %q: %w", id, err)
     }
+```
+
+#### container.NewTask와 shim 기동
+
+`container.NewTask()`는 shim 프로세스를 기동하고 ttrpc로 첫 번째 RPC를 호출하는 핵심 경로입니다. `client/container.go`의 `NewTask`는 gRPC로 containerd 내부 `TaskService`에 `Create` 요청을 보냅니다.
+
+```go
+// https://github.com/containerd/containerd/blob/dea7da592f5d1/client/container.go#L227
+func (c *container) NewTask(ctx context.Context, ioCreate cio.Creator, opts ...NewTaskOpts) (_ Task, retErr error) {
+    // ...
+    request := &tasks.CreateTaskRequest{
+        ContainerID: c.id,
+        // ✅ IO FIFO 경로, rootfs 마운트 정보 등 포함
+    }
+    // ...
+    response, err := c.client.TaskService().Create(ctx, request) // ✅ gRPC → local.Create() → TaskManager.Create()
+    // ...
+    t.pid = response.Pid
+    return t, nil
+}
+```
+
+gRPC 요청은 `plugins/services/tasks/local.go`의 `local.Create()`로 도달합니다.
+
+```go
+// https://github.com/containerd/containerd/blob/dea7da592f5d1/plugins/services/tasks/local.go#L161
+func (l *local) Create(ctx context.Context, r *api.CreateTaskRequest, ...) (*api.CreateTaskResponse, error) {
+    container, err := l.getContainer(ctx, r.ContainerID) // ✅ bolt DB에서 컨테이너 메타데이터 조회
+
+    opts := runtime.CreateOpts{
+        Spec:          container.Spec,   // ✅ CreateContainer 단계에서 저장해둔 OCI 스펙
+        Runtime:       container.Runtime.Name,
+        SandboxID:     container.SandboxID,
+        // ...
+    }
+    c, err := rtime.Create(ctx, r.ContainerID, opts) // ✅ TaskManager.Create() 호출
+    // ...
+}
+```
+
+`TaskManager.Create()`에서는 OCI 번들 디렉터리를 생성하고 shim 바이너리를 exec합니다.
+
+```go
+// https://github.com/containerd/containerd/blob/dea7da592f5d1/core/runtime/v2/task_manager.go#L153
+func (m *TaskManager) Create(ctx context.Context, taskID string, opts runtime.CreateOpts) (_ runtime.Task, retErr error) {
+    bundle, err := NewBundle(ctx, m.root, m.state, taskID, opts.Spec)
+    // ✅ /var/lib/containerd/io.containerd.runtime.v2.task/<ns>/<id>/ 에 OCI 번들 생성
+    // ✅ config.json(OCI 스펙)을 번들 디렉터리에 기록
+
+    shim, err := m.manager.Start(ctx, taskID, bundle, opts) // ✅ ShimManager.Start() → shim 바이너리 exec
+    // ...
+    shimTask, err := newShimTask(shim)
+
+    t, err := shimTask.Create(ctx, opts) // ✅ ttrpc로 shim에 CreateTask 전송
+    // ...
+}
+```
+
+`ShimManager.Start()`는 샌드박스에 이미 shim이 실행 중인 경우 기존 shim에 재접속하고, 그렇지 않으면 `startShim()`으로 새 shim 바이너리를 exec합니다.
+
+```go
+// https://github.com/containerd/containerd/blob/dea7da592f5d1/core/runtime/v2/shim_manager.go#L169
+func (m *ShimManager) Start(ctx context.Context, id string, bundle *Bundle, opts runtime.CreateOpts) (_ ShimInstance, retErr error) {
+    if opts.SandboxID != "" {
+        // ✅ pause 컨테이너용 shim이 이미 동작 중이면 기존 연결 재사용
+        // ✅ pause 컨테이너 task가 shim을 먼저 기동하므로 워크로드 컨테이너는 재사용 경로 진입
+        process, err := m.Get(ctx, opts.SandboxID)
+        params = restoreBootstrapParams(process.Bundle()) // ✅ bootstrap.json에서 ttrpc 주소 복원
+        // ...
+        shim, err := loadShim(ctx, bundle, func() {})    // ✅ 기존 소켓에 ttrpc 재연결
+        return shim, nil
+    }
+    // ✅ SandboxID가 없거나 처음 시작하는 경우 새 shim 프로세스 exec
+    shim, err := m.startShim(ctx, bundle, id, opts)
+    // ...
+}
+```
+
+`startShim()`은 shim 바이너리를 exec하고 반환받은 ttrpc 소켓 주소로 연결합니다.
+
+```go
+// https://github.com/containerd/containerd/blob/dea7da592f5d1/core/runtime/v2/shim_manager.go#L270
+func (m *ShimManager) startShim(ctx context.Context, bundle *Bundle, id string, opts runtime.CreateOpts) (*shim, error) {
+    runtimePath, err := m.resolveRuntimePath(opts.Runtime) // ✅ containerd-shim-runc-v2 경로 결정
+
+    b := shimBinary(bundle, shimBinaryConfig{
+        runtime:      runtimePath,
+        address:      m.containerdAddress,      // ✅ /run/containerd/containerd.sock
+        ttrpcAddress: m.containerdTTRPCAddress, // ✅ /run/containerd/containerd.sock.ttrpc
+    })
+    shim, err := b.Start(ctx, ...) // ✅ binary.Start() → shim 바이너리 exec
+    // ...
+}
+```
+
+`binary.Start()`는 shim 바이너리를 `containerd-shim-runc-v2 -id <id> start` 명령어로 exec합니다. shim은 자신의 ttrpc 소켓 주소를 stdout에 출력하고 종료하며, 기동된 shim 데몬은 독립 프로세스로 구동됩니다.
+
+```go
+// https://github.com/containerd/containerd/blob/dea7da592f5d1/core/runtime/v2/binary.go#L63
+func (b *binary) Start(ctx context.Context, opts *types.Any, onClose func()) (_ *shim, err error) {
+    args := []string{"-id", b.bundle.ID, "start"}
+    cmd, err := client.Command(ctx, &client.CommandConfig{
+        Runtime: b.runtime,   // ✅ containerd-shim-runc-v2 바이너리 경로
+        Path:    b.bundle.Path,
+        Args:    args,
+        // ...
+    })
+    // ...
+    out, err := cmd.CombinedOutput() // ✅ shim 바이너리를 exec하고 stdout에서 ttrpc 주소 수신
+
+    params, err := parseStartResponse(out) // ✅ {"version":3,"address":"unix:///run/...","protocol":"ttrpc"}
+
+    conn, err := makeConnection(ctx, b.bundle.ID, params, ...) // ✅ ttrpc 클라이언트 연결 수립
+    // ...
+}
+```
+
+ttrpc 연결이 수립되면 `shimTask.Create()`로 shim에 컨테이너 생성을 지시합니다. shim은 이 시점에 runc를 호출하여 OCI 번들 기반의 컨테이너 환경(namespaces, cgroups)을 준비합니다.
+
+```go
+// https://github.com/containerd/containerd/blob/dea7da592f5d1/core/runtime/v2/shim.go#L594
+func (s *shimTask) Create(ctx context.Context, opts runtime.CreateOpts) (runtime.Task, error) {
+    request := &task.CreateTaskRequest{
+        ID:     s.ID(),
+        Bundle: s.Bundle(), // ✅ OCI 번들 경로 (config.json, rootfs 포함)
+        // ...
+    }
+    _, err := s.task.Create(ctx, request) // ✅ ttrpc로 shim에 CreateTask 전송 → shim이 runc create 수행
+    // ...
+}
+```
+
+이 시점까지의 shim 기동 흐름을 정리하면 다음과 같습니다.
+
+```mermaid
+sequenceDiagram
+    participant C as Controller.Start
+    participant CT as client.container
+    participant TS as TaskService (local.Create)
+    participant TM as TaskManager.Create
+    participant SM as ShimManager.Start
+    participant SB as binary.Start
+    participant SH as containerd-shim-runc-v2
+
+    C->>CT: container.NewTask()
+    CT->>TS: TaskService().Create(CreateTaskRequest)
+    TS->>TM: rtime.Create(taskID, opts)
+    TM->>TM: NewBundle() — OCI 번들 디렉터리 + config.json 생성
+    TM->>SM: manager.Start(taskID, bundle, opts)
+
+    alt 샌드박스 shim 이미 실행 중 (워크로드 컨테이너)
+        SM->>SM: m.Get(sandboxID) → restoreBootstrapParams()
+        SM->>SH: loadShim() — 기존 ttrpc 소켓 재연결
+    else 새 shim 기동 (pause 컨테이너)
+        SM->>SB: startShim() → b.Start()
+        SB->>SH: exec "containerd-shim-runc-v2 -id <id> start"
+        SH-->>SB: stdout: {"version":3,"address":"unix://...","protocol":"ttrpc"}
+        SB->>SH: makeConnection() — ttrpc 클라이언트 연결
+    end
+
+    TM->>SH: shimTask.Create(CreateTaskRequest) via ttrpc
+    Note over SH: runc create — namespaces/cgroups 준비
+    SH-->>TM: CreateTaskResponse{Pid}
+    TM-->>TS: shimTask
+    TS-->>CT: CreateTaskResponse{Pid}
+    CT-->>C: Task{pid}
 ```
 
 ### NRI 훅과 샌드박스 상태 완료
