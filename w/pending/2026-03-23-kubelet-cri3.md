@@ -397,7 +397,13 @@ func NewNetNSFromPID(baseDir string, pid uint32) (*NetNS, error) {
 }
 ```
 
-`newNS()` 내부에서는 전용 OS 스레드를 잠근 고루틴 안에서 커널 시스템 콜로 네임스페이스를 생성하고, 그 결과를 파일시스템에 바인드 마운트합니다.
+`newNS()` 내부에서는 전용 OS 스레드를 잠근 고루틴 안에서 두 가지 핵심 작업을 수행합니다. 첫 번째는 `unshare` syscall로 새 netns를 생성하는 것이고, 두 번째는 바인드 마운트로 그 netns를 파일시스템 경로에 고정하는 것입니다.
+
+Linux 네트워크 네임스페이스는 프로세스가 아니라 OS 스레드 단위로 적용되는 커널 오브젝트입니다. `unshare(CLONE_NEWNET)`은 현재 OS 스레드의 네트워크 네임스페이스를 새로 분리하는 syscall입니다. `clone(CLONE_NEWNET)`처럼 새 프로세스를 생성하지 않고, 오직 현재 스레드가 새 netns로 전환됩니다. 그런데 Go 런타임은 M:N 스레드 모델(가상 고루틴 : OS 스레드 = N:M)이기 때문에, 일반 고루틴은 실행 중에 다른 OS 스레드로 이동할 수 있습니다. netns는 스레드 단위이므로  OS 스레드를 고루틴에 고정(`LockOSThread`)하지 않으면 `unshare` 효과가 사라집니다. 따라서 전용 고루틴을 만들고 그 안에서 `LockOSThread`를 호출한 뒤 `unshare`를 수행합니다.
+
+그런데 여기서 문제가 발생합니다. 커널의 netns는 참조 카운트가 0이 되는 순간 소멸합니다. 참조를 보유하는 주체는 세 가지입니다. 해당 netns를 사용하는 스레드, `/proc/<tid>/ns/net`을 가리키는 열린 파일 디스크립터, 그리고 그 경로를 대상으로 한 바인드 마운트입니다. `unshare` 직후에는 전용 OS 스레드 하나만 참조를 보유하고 있습니다. 고루틴이 종료되면 go1.10+ 런타임은 `LockOSThread` 상태에서 Unlock 없이 끝난 OS 스레드를 파기하고, 스레드 참조도 함께 사라집니다. 따라서 아무런 조치 없이 고루틴을 종료하면 netns는 즉시 소멸됩니다.
+
+이 문제를 해결하기 위해 바인드 마운트를 사용합니다. 고루틴이 종료되기 전, `/proc/<tid>/task/<tid>/ns/net`(현재 OS 스레드의 netns 경로)을 `/var/run/netns/cni-<uuid>` 파일에 바인드 마운트합니다. 바인드 마운트는 VFS 레벨의 경로 참조를 커널 netns 오브젝트에 추가로 연결하므로, OS 스레드가 사라져 스레드 참조가 없어져도 마운트 참조가 살아있는 한 netns는 소멸하지 않습니다. 이후 CNI 플러그인은 이 경로를 통해 veth를 netns 안으로 이동시킬 수 있고, pause 프로세스는 `setns()`로 이 netns에 진입하여 자신을 이 네트워크 환경에 고정합니다.
 
 ```go
 // https://github.com/containerd/containerd/blob/dea7da592f5d1/pkg/netns/netns_linux.go#L55
@@ -406,32 +412,39 @@ func newNS(baseDir string, pid uint32) (nsPath string, err error) {
     nsName := fmt.Sprintf("cni-%x-%x-%x-%x-%x", ...) // ✅ cni-<uuid> 형식의 이름 생성
     nsPath = path.Join(baseDir, nsName)               // ✅ /var/run/netns/cni-<uuid>
 
-    mountPointFd, err := os.OpenFile(nsPath, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0666) // ✅ 빈 파일을 마운트 포인트로 생성
+    mountPointFd, err := os.OpenFile(nsPath, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0666)
+    // ✅ 바인드 마운트 대상이 될 빈 파일 생성 (마운트 포인트는 파일이어야 함)
 
     // ...
     go (func() {
         defer wg.Done()
-        runtime.LockOSThread() // ✅ 이 가상 스레드의 OS 스레드를 고정 (netns는 스레드 단위로 적용)
+        runtime.LockOSThread()
+        // ✅ 이 고루틴의 OS 스레드를 고정
+        //    netns는 스레드 단위로 적용되므로, 고루틴이 다른 OS 스레드로 이동하면 unshare 효과가 사라짐
 
-        origNS, err = cnins.GetNS(getCurrentThreadNetNSPath()) // ✅ 현재 스레드의 netns 저장
+        origNS, err = cnins.GetNS(getCurrentThreadNetNSPath()) // ✅ 현재 스레드의 netns 저장 (복귀용)
 
-        err = unix.Unshare(unix.CLONE_NEWNET) // ✅ 네임스페이스 생성 syscall: 인자로 `CLONE_NEWNET`을 전달하여 새 netns 생성
+        err = unix.Unshare(unix.CLONE_NEWNET)
+        // ✅ 현재 OS 스레드를 새 netns로 전환하는 syscall
+        //    새 프로세스를 fork하지 않고 현재 스레드만 분리된 새 netns에 진입함
+        //    이 시점에 netns를 참조하는 주체는 이 OS 스레드 하나뿐
 
         defer origNS.Set()
         // ✅ go1.10+ 에서는 LockOSThread() 후 Unlock 없이 고루틴이 종료되면 런타임이 해당 OS 스레드를 파기하므로
         //    원래 netns로 복귀할 필요가 없음
         //    그러나 go1.10 이전에는 LockOSThread()를 해도 스레드가 재사용될 수 있으므로
-        //    이 경우 새 netns가 적용된 스레드를 다른 고루틴이 이어 받게 되는 것을 막기 위해 원래 netns로 복귀
+        //    이 경우 새 netns가 적용된 스레드를 다른 고루틴이 이어받게 되는 것을 막기 위해 원래 netns로 복귀
 
         err = unix.Mount(getCurrentThreadNetNSPath(), nsPath, "none", unix.MS_BIND, "")
-        // ✅ 현재 스레드의 netns(/proc/<pid>/task/<tid>/ns/net)를 파일에 바인드 마운트
-        //    → 스레드가 종료된 뒤에도 netns가 /var/run/netns/cni-<uuid>를 통해 유지됨
+        // ✅ 현재 스레드의 netns(/proc/<tid>/task/<tid>/ns/net)를 /var/run/netns/cni-<uuid>에 바인드 마운트
+        //    → 마운트 참조가 생기므로 고루틴 종료 후 OS 스레드가 파기되어도 netns가 소멸하지 않음
+        //    → CNI와 pause 프로세스가 이 경로로 netns에 진입할 수 있게 됨
     })()
     wg.Wait()
     // ...
 ```
 
-`CLONE_NEWNET`으로 생성된 netns는 스레드가 사라지면 소멸되지만, 바인드 마운트를 통해 파일시스템 경로를 유지함으로써 pause 프로세스가 진입하기 전까지 netns가 살아있게 됩니다.
+이렇게 하면 `CLONE_NEWNET`으로 생성된 netns는 OS 스레드가 파기된 뒤에도 바인드 마운트 참조를 통해 살아있게 됩니다. 이후 CNI 플러그인이 veth pair를 생성하고 한쪽 끝을 이 netns 경로로 이동시키며, pause 프로세스가 시작될 때 해당 경로로 `setns()`를 호출하여 공유 네트워크 환경에 진입합니다.
 
 #### setupPodNetwork와 CNI 호출
 
