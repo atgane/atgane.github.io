@@ -1203,58 +1203,38 @@ func (c *criService) StartContainer(...) {
     return &runtime.StartContainerResponse{}, nil
 ```
 
-## 세 메서드의 흐름 요약
+## 정리
 
-kubelet이 파드를 생성할 때 CRI를 통해 다음 순서로 메서드를 호출합니다.
+지금까지 kubelet이 호출하는 CRI 메서드 세 가지의 containerd 내부 동작을 순서대로 살펴봤습니다.
 
-1. `RunPodSandbox` — 네트워크 네임스페이스와 pause 컨테이너를 생성·실행합니다. 이후 모든 컨테이너는 이 샌드박스의 netns/IPC 네임스페이스를 공유합니다.
-2. `CreateContainer` — 각 컨테이너에 대해 OCI 스펙, 이미지 스냅샷(overlay), IO FIFO를 준비하지만 프로세스를 시작하지는 않습니다.
-3. `StartContainer` — containerd task를 생성하고 shim을 통해 `runc create → runc start`를 실행하여 컨테이너 프로세스를 실제로 기동합니다.
+### RunPodSandbox
 
-각 단계에서 NRI 훅이 실행되어 외부 플러그인이 리소스나 스펙을 조정할 수 있으며, 모든 상태 변화는 containerd의 인메모리 store와 bolt DB에 기록됩니다.
+- 샌드박스 ID를 생성하고 이름을 예약한 뒤, lease를 발급하여 리소스 누수를 방지합니다.
+- 호스트 네트워크를 사용하지 않는 경우, 전용 고루틴에서 `LockOSThread` + `unshare(CLONE_NEWNET)`으로 새 netns를 생성하고, 바인드 마운트로 `/var/run/netns/cni-<uuid>` 경로에 고정합니다.
+- go-cni를 통해 CNI 플러그인 체인을 실행하여 veth pair 생성과 IP 할당을 수행합니다.
+- `sandboxService`를 통해 `sandbox.Controller`(기본 `podsandbox.Controller`)의 `Create` → `Start`를 차례로 호출합니다.
+  - `Create`는 메타데이터를 인메모리 store에 등록하는 것이 전부입니다.
+  - `Start`는 pause 이미지 확인, OCI 스펙 생성, `NewContainer` 호출(bolt DB 저장), `NewTask` 호출(shim 기동 + `runc create`), `task.Start()`(`runc start`)까지 진행합니다.
+- NRI `RunPodSandbox` 훅을 실행하고 상태를 Ready로 전환한 뒤, 종료 모니터 고루틴을 시작하고 kubelet에 샌드박스 ID를 반환합니다.
 
----
+### CreateContainer
 
-# 추가 분석 목차
+- 실행 중인 샌드박스를 조회하고 pause 프로세스의 PID를 확보합니다(net/IPC/UTS 네임스페이스 경로 구성에 사용).
+- 컨테이너 ID를 생성하고 이름 충돌을 방지하기 위해 이름 인덱스에 예약합니다.
+- 로컬 이미지 store에서 이미지를 해석하여 containerd Image 객체로 변환합니다.
+- OCI 런타임 스펙을 생성하고, stdout/stderr FIFO 파이프를 초기화합니다.
+- overlay 스냅샷(쓰기 가능 레이어)을 생성하고, `NewContainer`로 spec을 포함한 컨테이너 메타데이터를 bolt DB에 영구 저장합니다.
+- 컨테이너 객체를 인메모리 store에 등록하고, `CONTAINER_CREATED` 이벤트를 발송하며 NRI post-create 훅을 실행합니다.
+- 이 단계에서는 프로세스를 실행하지 않으며, `config.json`도 아직 디스크에 기록되지 않습니다.
 
-## shim 내부 동작
+### StartContainer
 
-- shim 프로세스 기동 흐름: `container.NewTask()` → shim 바이너리 실행과 소켓 핸드셰이크
-- containerd ↔ shim 통신: ttrpc 프로토콜과 `TaskService` API
-- shim → runc 호출: OCI 번들 생성(`config.json`, rootfs 마운트), `runc create`, `runc start`
-- shim 재사용: 파드 내 컨테이너가 동일 shim을 공유하는 `Endpoint` 메커니즘
-
-## 이미지 관리
-
-- `ensureImageExists` 흐름: 로컬 존재 여부 확인과 `Pull` 트리거 조건
-- content store와 레이어 다운로드: digest 기반 중복 제거와 청크 저장
-- 이미지 언팩과 스냅샷 생성: overlay 레이어 스택 구성과 `Snapshotter.Prepare()`
-- `CreateContainer`의 `WithNewSnapshot`: 쓰기 가능 레이어(active snapshot) 생성과 마운트 정보 확보
-
-## bolt DB 상태 관리
-
-- bolt DB 버킷 구조: `containers`, `images`, `snapshots`, `leases`, `content` 버킷 배치
-- 컨테이너 메타데이터 스키마: spec proto 직렬화 저장 방식과 `NewContainer` 트랜잭션
-- 이미지·스냅샷 메타데이터: 레이어 체인 레퍼런스 저장과 GC lease 연동
-- containerd 재시작 복구: 인메모리 store 재구성 흐름 (`loadContainers`, `loadSandboxes`)
-
-## GC와 lease
-
-- lease의 역할: `RunPodSandbox`에서 lease를 먼저 생성하는 이유 — 중간 실패 시 고아 리소스 방지
-- GC 스케줄러 동작: `GCPlugin`이 트리거하는 mark-and-sweep와 버킷 순회
-- lease → snapshot·content 참조 체인: 어떤 리소스가 보호되고 어떤 리소스가 수거 대상이 되는지
-- 컨테이너 삭제 시 lease 해제와 스냅샷 정리 순서
-
-## 컨테이너·샌드박스 종료 흐름
-
-- `StopContainer`: SIGTERM 전송 → 타임아웃 후 SIGKILL, task stop 이후 상태 전환
-- `exitMonitor` 고루틴: `task.Wait()` 채널에서 종료 이벤트를 수신하고 컨테이너 상태를 `EXITED`로 업데이트하는 흐름
-- `StopPodSandbox`: 샌드박스 내 컨테이너 일괄 정지 → pause 컨테이너 종료 → CNI Del 호출로 네트워크 해제
-- `RemovePodSandbox`: task 삭제 → 스냅샷 제거 → netns 마운트 해제 → store·DB에서 레코드 삭제
-
-## 이벤트 시스템
-
-- containerd 이벤트 버스: exchange 패키지와 `publisher`/`subscriber` 인터페이스
-- `generateAndSendContainerEvent`의 실제 경로: 이벤트 객체 직렬화 → exchange publish → 구독자 전달
-- kubelet의 이벤트 소비: `GetContainerEvents` gRPC 스트림으로 containerd 이벤트를 수신하는 흐름
-- EventMonitor: shim에서 발생하는 task 이벤트(OOM, exit)를 containerd가 수신·처리하는 방식
+- container store에서 컨테이너를 조회하고, `CONTAINER_CREATED` 상태인지 검증하여 중복 실행을 차단합니다.
+- 샌드박스가 아직 Ready 상태인지 확인합니다.
+- stdout/stderr FIFO를 로그 파일과 연결하는 리다이렉션 고루틴을 시작합니다.
+- `container.NewTask`로 OCI 번들(`config.json`, rootfs 마운트)을 디스크에 기록하고, shim을 통해 `runc create`를 실행하여 cgroup/네임스페이스/rootfs 환경을 초기화합니다. 같은 파드 내라면 기존 shim을 재사용합니다.
+- `task.Wait`로 종료 이벤트 구독 채널을 미리 확보합니다.
+- NRI `StartContainer` 훅을 실행하여 CPU 핀닝, NUMA 정책 등 실행 전 리소스 조정을 적용합니다.
+- `task.Start`로 `runc start`를 호출하여 frozen 상태의 프로세스를 실제로 실행합니다.
+- PID와 시작 시각을 store에 기록하고, 종료 모니터 고루틴을 시작합니다.
+- `CONTAINER_STARTED` 이벤트를 발송하고 NRI post-start 훅을 실행한 뒤 kubelet에 응답을 반환합니다.
