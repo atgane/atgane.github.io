@@ -1,5 +1,21 @@
 ---
 title: "kubernetes worker: containerd 내부 동작"
+date: 2026-03-23 00:00:00 +0900
+categories:
+  - containerd
+tags:
+  - containerd
+  - kubernetes
+  - CRI
+  - RunPodSandbox
+  - CNI
+  - shim
+excerpt: "kubelet의 CRI 호출(RunPodSandbox, CreateContainer, StartContainer)에 대한 containerd 내부 동작을 코드 수준으로 분석합니다."
+toc: true
+toc_sticky: true
+author_profile: false
+header:
+  teaser: /assets/images/posts/kubernetes.png
 ---
 
 지금까지 scheduler, kubelet의 동작을 코드로 살펴봤고 kubelet에서 CRI의 호출 지점과 쉘에서 containerd, shim 프로세스를 살펴봤습니다. shim은 kubelet과 containerd 사이에서 파드의 라이프사이클을 관리하는 역할을 수행함을 알 수 있었습니다. 이번에는 쉘에서 확인한 containerd의 내부 동작을 살펴보도록 하겠습니다.
