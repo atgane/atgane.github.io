@@ -475,11 +475,86 @@ func (c *criService) setupPodNetwork(ctx context.Context, sandbox *sandboxstore.
 }
 ```
 
-`netPlugin.Setup()`은 [go-cni](https://github.com/containerd/go-cni) 라이브러리를 통해 `/etc/cni/net.d/` 설정 파일에 정의된 CNI 플러그인 체인을 순서대로 exec합니다. 기본 구성은 `bridge` → `host-local` → `loopback` 순이며, 각 플러그인은 다음을 수행합니다.
+`netPlugin.Setup()` 호출을 기준으로 containerd와 CNI 플러그인의 책임이 나뉩니다.
 
-- `bridge`: `cni0` 브리지에 veth pair를 생성하고 한쪽 끝을 netns 안으로 이동
-- `host-local`: IPAM으로 파드 IP를 할당하고 라우팅 규칙 추가
-- `loopback`: netns 내부의 lo 인터페이스를 UP 상태로 전환
+- containerd의 책임: 파드 netns 경로(`/var/run/netns/cni-<uuid>`)를 준비한 뒤 `netPlugin.Setup()`을 호출해 네트워크 구성을 위임하고, 완료 후 반환된 IP를 `sandbox.IP`에 저장합니다.
+- CNI의 책임: `netPlugin.Setup()` 이후의 모든 네트워크 조작입니다. veth pair 생성, IP 할당, 라우팅 규칙 설정은 모두 CNI 플러그인 바이너리(`/opt/cni/bin/bridge` 등)가 수행하며, containerd는 이 과정에 개입하지 않습니다.
+
+`netPlugin.Setup()`의 구현은 containerd에 내장된 [go-cni](https://github.com/containerd/go-cni) 라이브러리가 담당합니다. go-cni는 containerd와 실제 CNI 바이너리 사이의 중간 계층으로, `/etc/cni/net.d/` 디렉터리의 설정 파일을 읽어 플러그인 체인을 조립한 뒤 각 바이너리를 순서대로 exec합니다.
+
+```go
+// https://github.com/containerd/containerd/blob/dea7da592f5d1/vendor/github.com/containerd/go-cni/cni.go#L167
+func (c *libcni) Setup(ctx context.Context, id string, path string, opts ...NamespaceOpts) (*Result, error) {
+    // ...
+    ns, err := newNamespace(id, path, opts...) // ✅ id·netns 경로·opts를 Namespace 구조체로 래핑
+    // ...
+    result, err := c.attachNetworks(ctx, ns)   // ✅ 설정된 네트워크 목록을 병렬로 Attach
+    // ...
+}
+```
+
+`attachNetworks()`는 `/etc/cni/net.d/` 설정 파일 하나당 하나씩 만들어진 `Network` 목록을 순회하며, 각각 고루틴을 만들어 `Network.Attach(ns)`를 병렬로 호출합니다.
+
+```go
+// https://github.com/containerd/containerd/blob/dea7da592f5d1/vendor/github.com/containerd/go-cni/cni.go#L226
+func (c *libcni) attachNetworks(ctx context.Context, ns *Namespace) ([]*types100.Result, error) {
+    // ...
+    for i, network := range c.networks {
+        wg.Add(1)
+        go asynchAttach(ctx, i, network, ns, &wg, rc) // ✅ 네트워크 설정 파일마다 고루틴으로 Attach 실행
+    }
+    // ...
+}
+
+// https://github.com/containerd/containerd/blob/dea7da592f5d1/vendor/github.com/containerd/go-cni/namespace.go#L32
+func (n *Network) Attach(ctx context.Context, ns *Namespace) (*types100.Result, error) {
+    r, err := n.cni.AddNetworkList(ctx, n.config, ns.config(n.ifName))
+    // ✅ n.config(NetworkConfigList: bridge→host-local→loopback 체인)를
+    //    ns 파드 netns(/var/run/netns/cni-<uuid>)에 실제로 적용
+    // ...
+}
+```
+
+`AddNetworkList()`는 플러그인들을 직렬로 실행하면서 앞 플러그인의 결과를 다음 플러그인의 stdin에 전달합니다. 예를 들어 `bridge`가 생성한 veth 정보가 `host-local`에 전달되는 방식입니다.
+
+```go
+// https://github.com/containerd/containerd/blob/dea7da592f5d1/vendor/github.com/containernetworking/cni/libcni/api.go#L515
+func (c *CNIConfig) AddNetworkList(ctx context.Context, list *NetworkConfigList, rt *RuntimeConf) (types.Result, error) {
+    var result types.Result
+    for _, net := range list.Plugins {
+        result, err = c.addNetwork(ctx, list.Name, list.CNIVersion, net, result, rt)
+        // ✅ Plugins 배열을 순서대로 직렬 실행, 앞 플러그인 result를 prevResult로 전달
+        // ...
+    }
+    // ...
+}
+
+// https://github.com/containerd/containerd/blob/dea7da592f5d1/vendor/github.com/containernetworking/cni/libcni/api.go#L490
+func (c *CNIConfig) addNetwork(ctx context.Context, name, cniVersion string, net *PluginConfig, prevResult types.Result, rt *RuntimeConf) (types.Result, error) {
+    // ...
+    pluginPath, err := c.exec.FindInPath(net.Network.Type, c.Path)
+    // ✅ net.Network.Type("bridge" 등)으로 /opt/cni/bin/bridge 바이너리 경로 결정
+    // ...
+    return invoke.ExecPluginWithResult(ctx, pluginPath, newConf.Bytes, c.args("ADD", rt), c.exec)
+    // ✅ 플러그인 바이너리를 CNI_COMMAND=ADD 환경 변수와 함께 exec
+}
+```
+
+최종적으로 각 플러그인 바이너리는 `CNI_NETNS` 환경 변수(`/var/run/netns/cni-<uuid>`)와 설정 JSON(stdin)을 받아 실행되며, 해당 netns 안에서 직접 네트워크 인터페이스를 조작합니다. containerd는 exec 이후 이 과정에 전혀 개입하지 않습니다.
+
+```go
+// https://github.com/containerd/containerd/blob/dea7da592f5d1/vendor/github.com/containernetworking/cni/pkg/invoke/raw_exec.go#L34
+func (e *RawExec) ExecPlugin(ctx context.Context, pluginPath string, stdinData []byte, environ []string) ([]byte, error) {
+    // ...
+    c := exec.CommandContext(ctx, pluginPath) // ✅ /opt/cni/bin/bridge 등 플러그인 바이너리를 자식 프로세스로 실행
+    c.Env = environ      // ✅ CNI_COMMAND=ADD, CNI_NETNS=/var/run/netns/cni-<uuid>, CNI_IFNAME=eth0 등 환경 변수 전달
+    c.Stdin = bytes.NewBuffer(stdinData) // ✅ 네트워크 설정 JSON을 stdin으로 전달
+    c.Stdout = stdout
+    // ...
+    err := c.Run() // ✅ 플러그인 바이너리 실행 완료 대기
+    // ...
+}
+```
 
 ```mermaid
 sequenceDiagram
@@ -490,12 +565,15 @@ sequenceDiagram
     participant C as CNI plugins
 
     R->>N: NewNetNS("/var/run/netns")
-    N->>N: OpenFile("/var/run/netns/cni-uuid") 마운트 포인트 생성
+    N->>F: OpenFile("/var/run/netns/cni-uuid") 마운트 포인트 생성
     N->>N: goroutine + LockOSThread()
+    N->>K: GetNS(/proc/<tid>/task/<tid>/ns/net) → origNS 저장
     N->>K: unix.Unshare(CLONE_NEWNET)
-    Note over K: 새 netns를 현재 OS 스레드에 적용
-    N->>F: unix.Mount(/proc/pid/task/tid/ns/net → /var/run/netns/cni-uuid, MS_BIND)
-    Note over F: 스레드 종료 후에도 netns가 경로로 유지됨
+    Note over K: 현재 OS 스레드만 새 netns로 전환<br/>참조 주체: 이 OS 스레드 하나뿐
+    N->>F: unix.Mount(/proc/<tid>/task/<tid>/ns/net → /var/run/netns/cni-uuid, MS_BIND)
+    Note over F: 마운트 참조 추가
+    N->>N: 고루틴 종료 (defer origNS.Set() 실행)
+    Note over N,K: go1.10+ 런타임이 OS 스레드 파기<br/>스레드 참조 소멸 → 마운트 참조로 netns 유지
     N-->>R: NetNS{path: "/var/run/netns/cni-uuid"}
 
     R->>C: setupPodNetwork() → netPlugin.Setup(id, path)
