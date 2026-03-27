@@ -1,5 +1,5 @@
 ---
-title: "kubernetes worker: scheduler & kubelet에서 파드 생성 동작 따라가기"
+title: "kubernetes data plane: scheduler & kubelet에서 파드 생성 동작 따라가기"
 date: 2026-03-01 00:00:00 +0900
 categories:
   - Infra

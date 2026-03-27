@@ -1,5 +1,5 @@
 ---
-title: "kubernetes worker: containerd 내부 동작"
+title: "kubernetes data plane: containerd 내부 동작"
 date: 2026-03-23 00:00:00 +0900
 categories:
   - containerd
