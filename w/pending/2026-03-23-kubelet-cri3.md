@@ -675,6 +675,8 @@ flowchart TD
     C --> E
 ```
 
+`Controller.Create`는 실행 로직 없이 메타데이터를 인메모리 store에 등록하는 역할만 담당합니다. `sandbox.Sandbox`의 extension에서 CRI 메타데이터를 꺼내 `PodSandbox` 객체를 `StateUnknown` 상태로 초기화하고 `c.store.Save()`로 저장하는 것이 전부입니다. pause 컨테이너 실행을 포함한 모든 실질적인 처리는 이후 `Controller.Start`에서 이루어집니다.
+
 `Controller.Start` 내부 (`internal/cri/server/podsandbox/sandbox_run.go`)에서는 sandbox 이미지 확인, OCI 스펙 생성, containerd Container와 Task 생성, `task.Start()` 호출까지 진행됩니다.
 
 ```go
@@ -694,9 +696,13 @@ func (c *Controller) Start(ctx context.Context, id string) (cin sandbox.Controll
     }
 ```
 
+#### OCI 런타임 스펙 생성
+
+`Controller.Start`는 `sandboxContainerSpec()`에서 pause 컨테이너의 OCI 런타임 스펙을 생성합니다. 이 스펙은 `container.NewTask()`로 전달되어 shim이 컨테이너를 exec할 때 사용됩니다.
+
 #### container.NewTask와 shim 기동
 
-`container.NewTask()`는 shim 프로세스를 기동하고 ttrpc로 첫 번째 RPC를 호출하는 핵심 경로입니다. `client/container.go`의 `NewTask`는 gRPC로 containerd 내부 `TaskService`에 `Create` 요청을 보냅니다.
+`container.NewTask()`는 shim 프로세스를 기동하고 ttrpc로 첫 번째 RPC를 호출하는 핵심 경로입니다. `client/container.go`의 `NewTask`는 `c.client.TaskService().Create()`를 호출합니다. 여기서 `c.client`는 CRI 플러그인 초기화 시 `containerd.WithInMemoryServices(ic)`로 생성된 클라이언트이므로, Unix 소켓을 거치는 gRPC 호출이 아닌 프로세스 내부의 `local` 서비스를 직접 호출합니다.
 
 ```go
 // https://github.com/containerd/containerd/blob/dea7da592f5d1/client/container.go#L227
@@ -707,14 +713,14 @@ func (c *container) NewTask(ctx context.Context, ioCreate cio.Creator, opts ...N
         // ✅ IO FIFO 경로, rootfs 마운트 정보 등 포함
     }
     // ...
-    response, err := c.client.TaskService().Create(ctx, request) // ✅ gRPC → local.Create() → TaskManager.Create()
+    response, err := c.client.TaskService().Create(ctx, request) // ✅ 인메모리 → local.Create() → TaskManager.Create()
     // ...
     t.pid = response.Pid
     return t, nil
 }
 ```
 
-gRPC 요청은 `plugins/services/tasks/local.go`의 `local.Create()`로 도달합니다.
+`WithInMemoryServices`가 주입한 `local` 서비스의 `Create()`가 직접 호출됩니다. 이 `local` 구조체는 `plugins/services/tasks/local.go`에 정의되어 있으며, `api.TasksClient` 인터페이스를 구현하지만 gRPC 소켓을 사용하지 않습니다.
 
 ```go
 // https://github.com/containerd/containerd/blob/dea7da592f5d1/plugins/services/tasks/local.go#L161
