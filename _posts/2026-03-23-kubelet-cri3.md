@@ -33,7 +33,7 @@ containerd는 기능별 컴포넌트를 **플러그인**으로 분리하고, 플
 [cmd/containerd/main.go](https://github.com/containerd/containerd/blob/v2.2.1/cmd/containerd/main.go)의 `main()`은 단순합니다.
 
 ```go
-// cmd/containerd/main.go
+// https://github.com/containerd/containerd/blob/dea7da592f5d1/cmd/containerd/main.go#L24
 import (
     _ "github.com/containerd/containerd/v2/cmd/containerd/builtins"
 )
@@ -47,7 +47,7 @@ func main() {
 핵심은 blank import `_`입니다. Go 런타임은 `main()`이 실행되기 전에 import된 패키지의 `init()` 함수를 모두 실행합니다. [cmd/containerd/builtins/builtins.go](https://github.com/containerd/containerd/blob/v2.2.1/cmd/containerd/builtins/builtins.go)는 containerd가 제공하는 모든 빌트인 플러그인 패키지를 blank import하고 있습니다.
 
 ```go
-// cmd/containerd/builtins/builtins.go
+// https://github.com/containerd/containerd/blob/dea7da592f5d1/cmd/containerd/builtins/builtins.go#L20
 import (
     _ "github.com/containerd/containerd/v2/plugins/services/images"
     _ "github.com/containerd/containerd/v2/plugins/services/containers"
@@ -61,7 +61,7 @@ import (
 예를 들어 `GRPCPlugin`("images")은 gRPC 게이트웨이 역할을 하며 `ServicePlugin` 의존성을 선언합니다 ([plugins/services/images/service.go#L31](https://github.com/containerd/containerd/blob/v2.2.1/plugins/services/images/service.go#L31)).
 
 ```go
-// plugins/services/images/service.go
+// https://github.com/containerd/containerd/blob/dea7da592f5d1/plugins/services/images/service.go#L31
 func init() {
     registry.Register(&plugin.Registration{
         Type: plugins.GRPCPlugin,
@@ -71,7 +71,7 @@ func init() {
         },
         InitFn: func(ic *plugin.InitContext) (interface{}, error) {
             i, err := ic.GetByID(plugins.ServicePlugin, services.ImagesService)
-            ...
+            // ...
             return &service{local: i.(imagesapi.ImagesClient)}, nil
         },
     })
@@ -81,7 +81,7 @@ func init() {
 `ServicePlugin`("images")은 실제 비즈니스 로직을 담당하며 `MetadataPlugin`, `GCPlugin` 등을 의존성으로 선언합니다 ([plugins/services/images/local.go#L45](https://github.com/containerd/containerd/blob/v2.2.1/plugins/services/images/local.go#L45)).
 
 ```go
-// plugins/services/images/local.go
+// https://github.com/containerd/containerd/blob/dea7da592f5d1/plugins/services/images/local.go#L45
 func init() {
     registry.Register(&plugin.Registration{
         Type: plugins.ServicePlugin,
@@ -94,7 +94,7 @@ func init() {
         InitFn: func(ic *plugin.InitContext) (interface{}, error) {
             m, _ := ic.GetSingle(plugins.MetadataPlugin)  // bolt DB
             g, _ := ic.GetSingle(plugins.GCPlugin)
-            ...
+            // ...
             return &local{
                 store: metadata.NewImageStore(m.(*metadata.DB)),
                 gc:    g.(gcScheduler),
