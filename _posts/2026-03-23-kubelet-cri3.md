@@ -525,8 +525,9 @@ func (c *libcni) attachNetworks(ctx context.Context, ns *Namespace) ([]*types100
 // https://github.com/containerd/containerd/blob/dea7da592f5d1/vendor/github.com/containerd/go-cni/namespace.go#L32
 func (n *Network) Attach(ctx context.Context, ns *Namespace) (*types100.Result, error) {
     r, err := n.cni.AddNetworkList(ctx, n.config, ns.config(n.ifName))
-    // ✅ n.config(NetworkConfigList: bridge→host-local→loopback 체인)를
+    // ✅ n.config(NetworkConfigList: ptp→portmap 체인)를
     //    ns 파드 netns(/var/run/netns/cni-<uuid>)에 실제로 적용
+    //    (host-local은 ptp의 ipam이지 체인의 독립 플러그인이 아님)
     // ...
 }
 ```
