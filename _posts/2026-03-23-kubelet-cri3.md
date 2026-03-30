@@ -1112,36 +1112,16 @@ func (c *criService) createContainer(r *createContainerRequest) (_ string, retEr
 
 `customopts.WithNewSnapshot`은 먼저 이미지의 최상위 체인 ID를 parent로 하여 `s.Prepare`를 시도합니다. parent 스냅샷이 아직 없으면(`errdefs.IsNotFound`) `i.Unpack`을 호출하여 레이어별 언팩을 수행합니다.
 
-호출 흐름은 다음과 같습니다.
-
-```
-customopts.WithNewSnapshot           internal/cri/opts/container.go:39
-  └── containerd.withNewSnapshot     client/container_opts.go:237
-        └── s.Prepare() → IsNotFound
-              └── image.Unpack       client/image.go:301
-                    └── rootfs.ApplyLayerWithOpts   pkg/rootfs/apply.go:91  ← 레이어마다 반복
-                          └── applyLayers           pkg/rootfs/apply.go:112
-                                ├── sn.Prepare(tmpKey, parentChainID)
-                                │     └── (o *snapshotter).Prepare   overlay.go:265
-                                │           └── createSnapshot(KindActive)  overlay.go:428
-                                │                 ├── prepareDirectory → snapshots/<N>/fs/, work/ 생성
-                                │                 └── mounts() → []mount.Mount 반환
-                                ├── a.Apply(layer.Blob, mounts)  ← 반환된 mounts로 tar 레이어 추출
-                                └── sn.Commit(chainID, tmpKey)   ← Active → Committed 전환
-```
-
-`withNewSnapshot`의 코드와 `applyLayers`의 세 단계는 다음과 같습니다.
-
 ```go
 // https://github.com/containerd/containerd/blob/dea7da592f5d1/internal/cri/opts/container.go#L39
 func WithNewSnapshot(id string, i containerd.Image, ...) containerd.NewContainerOpts {
-    f := containerd.WithNewSnapshot(id, i, opts...)
+    f := containerd.WithNewSnapshot(id, i, opts...) // ✅ client/container_opts.go:237의 withNewSnapshot으로 위임
     return func(...) error {
         if err := f(ctx, client, c); err != nil {
             if !errdefs.IsNotFound(err) {
                 return err
             }
-            if err := i.Unpack(ctx, c.Snapshotter); err != nil { // ✅ parent 스냅샷 없으면 이미지 언팩 실행
+            if err := i.Unpack(ctx, c.Snapshotter); err != nil { // ✅ client/image.go:301의 image.Unpack 호출
                 return fmt.Errorf("error unpacking image: %w", err)
             }
             return f(ctx, client, c)
@@ -1151,12 +1131,28 @@ func WithNewSnapshot(id string, i containerd.Image, ...) containerd.NewContainer
 }
 ```
 
+`image.Unpack`은 이미지의 레이어 목록을 순회하며 각 레이어마다 `ApplyLayerWithOpts`를 호출합니다.
+
+```go
+// https://github.com/containerd/containerd/blob/dea7da592f5d1/client/image.go#L346
+func (i *image) Unpack(...) error {
+    // ...
+    for _, layer := range layers {
+        unpacked, err = rootfs.ApplyLayerWithOpts(ctx, layer, chain, sn, a, ...)
+        // ✅ pkg/rootfs/apply.go:91의 ApplyLayerWithOpts → applyLayers 호출 (레이어마다 반복)
+    }
+}
+```
+
+`applyLayers`는 레이어마다 Prepare → Apply → Commit을 순서대로 수행합니다.
+
 ```go
 // https://github.com/containerd/containerd/blob/dea7da592f5d1/pkg/rootfs/apply.go#L112
 func applyLayers(...) error {
     // ...
     mounts, err = sn.Prepare(ctx, key, parent.String(), opts...)
-    // ✅ Prepare → createSnapshot → prepareDirectory: snapshots/<N>/fs/, work/ 디렉터리 생성
+    // ✅ overlay.go:265의 (o *snapshotter).Prepare → overlay.go:428의 createSnapshot
+    // ✅ createSnapshot 내부에서 prepareDirectory: snapshots/<N>/fs/, work/ 디렉터리 생성
     // ✅ 반환된 mounts는 tar 추출 시 임시 마운트 경로로 사용 (unpack 전용, mount(2) 발생)
     // ...
     diff, err = a.Apply(ctx, layer.Blob, mounts, applyOpts...)
@@ -1175,20 +1171,49 @@ func applyLayers(...) error {
 
 이미지 레이어가 모두 committed 상태가 되면, `withNewSnapshot`은 컨테이너 ID를 key, 최상위 이미지 체인 ID를 parent로 하여 다시 `s.Prepare`를 호출합니다.
 
-호출 흐름은 다음과 같습니다.
-
+```go
+// https://github.com/containerd/containerd/blob/dea7da592f5d1/client/container_opts.go#L237
+func withNewSnapshot(id string, i Image, readonly bool, ...) NewContainerOpts {
+    return func(ctx context.Context, client *Client, c *containers.Container) error {
+        // ...
+        _, err = s.Prepare(ctx, id, parent, opts...)
+        // ✅ 반환값 []mount.Mount 무시 — overlay.go:265의 (o *snapshotter).Prepare 호출
+        // ...
+        c.SnapshotKey = id   // ✅ bolt DB 저장 시 스냅샷 키로 참조
+        c.Image = i.Name()
+        return nil
+    }
+}
 ```
-customopts.WithNewSnapshot           internal/cri/opts/container.go:39
-  └── containerd.withNewSnapshot     client/container_opts.go:237
-        └── _, err = s.Prepare(ctx, containerID, imageChainID)  ← 반환값 []mount.Mount 무시
-              └── (o *snapshotter).Prepare  overlay.go:265
-                    └── createSnapshot(KindActive, containerID, imageChainID)  overlay.go:428
-                          ├── prepareDirectory → snapshots/<M>/fs/, work/ 생성  overlay.go:533
-                          └── mounts(s, info) → []mount.Mount 반환  overlay.go:552
-        c.SnapshotKey = containerID  ← bolt DB 저장 시 스냅샷 키로 참조
+
+`(o *snapshotter).Prepare`는 단순히 `createSnapshot`에 `KindActive`를 넘겨 위임합니다.
+
+```go
+// https://github.com/containerd/containerd/blob/dea7da592f5d1/plugins/snapshots/overlay/overlay.go#L265
+func (o *snapshotter) Prepare(ctx context.Context, key, parent string, opts ...snapshots.Opt) ([]mount.Mount, error) {
+    return o.createSnapshot(ctx, snapshots.KindActive, key, parent, opts)
+    // ✅ overlay.go:428의 createSnapshot 호출
+}
 ```
 
-`mounts()`는 `createSnapshot` 내부에서 호출되며, overlayfs 마운트에 필요한 경로 정보를 `[]mount.Mount` 구조체로 조립하여 반환할 뿐 `mount(2)` 시스템 콜을 발생시키지 않습니다.
+`createSnapshot`은 디렉터리를 생성하고 마지막으로 `mounts()`를 호출하여 마운트 옵션 구조체를 반환합니다. 이 시점에 `mount(2)` 시스템 콜은 발생하지 않습니다.
+
+```go
+// https://github.com/containerd/containerd/blob/dea7da592f5d1/plugins/snapshots/overlay/overlay.go#L428
+func (o *snapshotter) createSnapshot(...) (_ []mount.Mount, err error) {
+    // ...
+    td, err = o.prepareDirectory(ctx, snapshotDir, kind)
+    // ✅ overlay.go:533의 prepareDirectory: snapshots/<M>/fs/, work/ 디렉터리 생성
+    // ...
+    path = filepath.Join(snapshotDir, s.ID)
+    os.Rename(td, path)   // ✅ 임시 디렉터리를 snapshots/<M>/ 위치에 확정
+    // ...
+    return o.mounts(s, info), nil
+    // ✅ overlay.go:552의 mounts() 호출 → []mount.Mount 반환 (mount(2) 없음)
+}
+```
+
+`mounts()`는 overlayfs 마운트에 필요한 경로 정보를 `[]mount.Mount` 구조체로 조립하여 반환할 뿐 `mount(2)` 시스템 콜을 발생시키지 않습니다.
 
 ```go
 // https://github.com/containerd/containerd/blob/dea7da592f5d1/plugins/snapshots/overlay/overlay.go#L552
