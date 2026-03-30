@@ -56,9 +56,7 @@ import (
 )
 ```
 
-각 플러그인 패키지의 `init()` 함수가 import 될 때 실행됩니다. 이때 `registry.Register()`를 호출하여 플러그인의 타입, ID, 의존성, 초기화 함수(`InitFn`)를 전역 레지스트리에 등록합니다. 예를 들어 이미지 서비스는 두 개의 플러그인을 등록합니다.
-
-예를 들어 `GRPCPlugin`("images")은 gRPC 게이트웨이 역할을 하며 `ServicePlugin` 의존성을 선언합니다 ([plugins/services/images/service.go#L31](https://github.com/containerd/containerd/blob/v2.2.1/plugins/services/images/service.go#L31)).
+각 플러그인 패키지의 `init()` 함수가 import 될 때 실행됩니다. 이때 `registry.Register()`를 호출하여 플러그인의 타입, ID, 의존성, 초기화 함수(`InitFn`)를 전역 레지스트리에 등록합니다. 예를 들어 `GRPCPlugin`("images")은 gRPC 게이트웨이 역할을 하며 `ServicePlugin` 의존성을 선언합니다 ([plugins/services/images/service.go#L31](https://github.com/containerd/containerd/blob/v2.2.1/plugins/services/images/service.go#L31)).
 
 ```go
 // https://github.com/containerd/containerd/blob/dea7da592f5d1/plugins/services/images/service.go#L31
@@ -286,7 +284,7 @@ func App() *cli.App {
 
 다음 절에서는 이 구조를 바탕으로 `GRPCPlugin "cri"` 플러그인이 어떻게 등록되고, 세 CRI 메서드가 containerd 내부에서 어떤 단계를 거쳐 처리되는지 추적해 보겠습니다.
 
-# 내부 메서드 흐름
+# 내부 RPC 흐름
 
 `plugins/cri/cri.go`의 `init()`은 `GRPCPlugin` 타입의 `"cri"` 플러그인을 전역 레지스트리에 등록합니다.
 
@@ -1101,6 +1099,120 @@ func (c *criService) createContainer(r *createContainerRequest) (_ string, retEr
     cntr, err = c.client.NewContainer(r.ctx, r.containerID, opts...)
     // ✅ ContainerService().Create() → bolt DB 트랜잭션으로 spec 포함 컨테이너 메타데이터 영구 저장
 ```
+
+`NewContainer`는 opt 목록을 순차적으로 적용하는데, 이 중 `customopts.WithNewSnapshot`이 실제로 파일시스템 레이어를 디스크에 구성하는 역할을 담당합니다. 이것이 스냅샷터가 담당하는 영역입니다.
+
+스냅샷터의 책임은 세 가지로 요약됩니다.
+
+- content store에 보관된 압축 tar 형태의 이미지 레이어를 읽기 전용 디렉터리로 추출하는 이미지 레이어 언팩(lower dir 생성)
+- 컨테이너마다 쓰기 변경사항을 기록하는 writable 디렉터리를 생성하는 컨테이너 쓰기 레이어(upper dir 생성)
+- overlayfs가 이 레이어들을 하나의 파일시스템으로 합성할 수 있도록 마운트 옵션 구조체(`[]mount.Mount`)를 반환 — 단, `mount(2)` 시스템 콜은 이 단계에서 발생하지 않음
+
+#### 이미지 레이어 → lower dir 변환 (Unpack)
+
+`customopts.WithNewSnapshot`은 먼저 이미지의 최상위 체인 ID를 parent로 하여 `s.Prepare`를 시도합니다. parent 스냅샷이 아직 없으면(`errdefs.IsNotFound`) `i.Unpack`을 호출하여 레이어별 언팩을 수행합니다.
+
+호출 흐름은 다음과 같습니다.
+
+```
+customopts.WithNewSnapshot           internal/cri/opts/container.go:39
+  └── containerd.withNewSnapshot     client/container_opts.go:237
+        └── s.Prepare() → IsNotFound
+              └── image.Unpack       client/image.go:301
+                    └── rootfs.ApplyLayerWithOpts   pkg/rootfs/apply.go:91  ← 레이어마다 반복
+                          └── applyLayers           pkg/rootfs/apply.go:112
+                                ├── sn.Prepare(tmpKey, parentChainID)
+                                │     └── (o *snapshotter).Prepare   overlay.go:265
+                                │           └── createSnapshot(KindActive)  overlay.go:428
+                                │                 ├── prepareDirectory → snapshots/<N>/fs/, work/ 생성
+                                │                 └── mounts() → []mount.Mount 반환
+                                ├── a.Apply(layer.Blob, mounts)  ← 반환된 mounts로 tar 레이어 추출
+                                └── sn.Commit(chainID, tmpKey)   ← Active → Committed 전환
+```
+
+`withNewSnapshot`의 코드와 `applyLayers`의 세 단계는 다음과 같습니다.
+
+```go
+// https://github.com/containerd/containerd/blob/dea7da592f5d1/internal/cri/opts/container.go#L39
+func WithNewSnapshot(id string, i containerd.Image, ...) containerd.NewContainerOpts {
+    f := containerd.WithNewSnapshot(id, i, opts...)
+    return func(...) error {
+        if err := f(ctx, client, c); err != nil {
+            if !errdefs.IsNotFound(err) {
+                return err
+            }
+            if err := i.Unpack(ctx, c.Snapshotter); err != nil { // ✅ parent 스냅샷 없으면 이미지 언팩 실행
+                return fmt.Errorf("error unpacking image: %w", err)
+            }
+            return f(ctx, client, c)
+        }
+        return nil
+    }
+}
+```
+
+```go
+// https://github.com/containerd/containerd/blob/dea7da592f5d1/pkg/rootfs/apply.go#L112
+func applyLayers(...) error {
+    // ...
+    mounts, err = sn.Prepare(ctx, key, parent.String(), opts...)
+    // ✅ Prepare → createSnapshot → prepareDirectory: snapshots/<N>/fs/, work/ 디렉터리 생성
+    // ✅ 반환된 mounts는 tar 추출 시 임시 마운트 경로로 사용 (unpack 전용, mount(2) 발생)
+    // ...
+    diff, err = a.Apply(ctx, layer.Blob, mounts, applyOpts...)
+    // ✅ content store의 tar → mounts 경로에 추출 → snapshots/<N>/fs/ 하위에 레이어 파일트리 기록
+    // ...
+    if err = sn.Commit(ctx, chainID.String(), key, opts...); err != nil {
+    // ✅ bolt DB에서 snapshot kind: Active → Committed; snapshots/<N>/fs/ 가 lower dir로 확정
+        ...
+    }
+}
+```
+
+레이어 수만큼 이 과정이 반복되어, 이미지의 각 레이어가 `snapshots/<N>/fs/`에 개별적으로 커밋됩니다.
+
+#### 컨테이너 쓰기 레이어 준비 (Prepare)
+
+이미지 레이어가 모두 committed 상태가 되면, `withNewSnapshot`은 컨테이너 ID를 key, 최상위 이미지 체인 ID를 parent로 하여 다시 `s.Prepare`를 호출합니다.
+
+호출 흐름은 다음과 같습니다.
+
+```
+customopts.WithNewSnapshot           internal/cri/opts/container.go:39
+  └── containerd.withNewSnapshot     client/container_opts.go:237
+        └── _, err = s.Prepare(ctx, containerID, imageChainID)  ← 반환값 []mount.Mount 무시
+              └── (o *snapshotter).Prepare  overlay.go:265
+                    └── createSnapshot(KindActive, containerID, imageChainID)  overlay.go:428
+                          ├── prepareDirectory → snapshots/<M>/fs/, work/ 생성  overlay.go:533
+                          └── mounts(s, info) → []mount.Mount 반환  overlay.go:552
+        c.SnapshotKey = containerID  ← bolt DB 저장 시 스냅샷 키로 참조
+```
+
+`mounts()`는 `createSnapshot` 내부에서 호출되며, overlayfs 마운트에 필요한 경로 정보를 `[]mount.Mount` 구조체로 조립하여 반환할 뿐 `mount(2)` 시스템 콜을 발생시키지 않습니다.
+
+```go
+// https://github.com/containerd/containerd/blob/dea7da592f5d1/plugins/snapshots/overlay/overlay.go#L552
+func (o *snapshotter) mounts(s storage.Snapshot, info snapshots.Info) []mount.Mount {
+    // ...
+    if s.Kind == snapshots.KindActive {
+        options = append(options,
+            fmt.Sprintf("workdir=%s", o.workPath(s.ID)),   // ✅ snapshots/<M>/work → overlay work dir 경로
+            fmt.Sprintf("upperdir=%s", o.upperPath(s.ID)), // ✅ snapshots/<M>/fs  → 컨테이너 쓰기 레이어 경로
+        )
+    }
+    // ...
+    parentPaths := make([]string, len(s.ParentIDs))
+    for i := range s.ParentIDs {
+        parentPaths[i] = o.upperPath(s.ParentIDs[i])       // ✅ 이미지 레이어 fs/ 경로들 → lower dirs 경로
+    }
+    options = append(options, fmt.Sprintf("lowerdir=%s", strings.Join(parentPaths, ":")))
+
+    return []mount.Mount{{Type: "overlay", Source: "overlay", Options: options}}
+    // ✅ 마운트 옵션 구조체만 반환 — mount(2) 없음
+}
+```
+
+`withNewSnapshot`은 `s.Prepare`의 반환값을 명시적으로 무시(`_, err = ...`)하고 `c.SnapshotKey = containerID`만 기록합니다. 즉, 이 단계에서는 overlayfs 마운트를 위한 디렉터리 구조(`lowerdir`, `upperdir`, `workdir`)만 디스크에 준비되며, 실제 `mount(2)` 시스템 콜은 `StartContainer → NewTask → NewBundle` 단계에서 shim이 rootfs를 마운트할 때 비로소 발생합니다.
 
 ### 컨테이너 store 등록과 이벤트 발송
 
