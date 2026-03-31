@@ -121,11 +121,13 @@ flowchart TD
 
     subgraph "프로세스 시작"
         B["registry.Graph() DFS 위상 정렬 초기화"]
+        C["CRI 서버 기동 대기"]
     end
 
     subgraph "RunPodSandbox"
         D["unshare(CLONE_NEWNET) + bind mount netns 생성"]
         E["CNI 실행 netns 경로 전달"]
+        F["CreateSandbox → StartSandbox 완료"]
         D --> E --> F
     end
 
