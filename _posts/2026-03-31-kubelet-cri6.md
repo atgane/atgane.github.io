@@ -1,5 +1,5 @@
 ---
-title: "kubernetes data plane: containerd는 언제 결정하는가"
+title: "kubernetes data plane: containerd의 설계 선택 추적하기"
 date: 2026-03-31 00:00:00 +0900
 categories:
   - containerd
