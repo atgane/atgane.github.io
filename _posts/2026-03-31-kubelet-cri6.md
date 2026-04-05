@@ -115,37 +115,93 @@ Unpack은 이 압축 tar를 풀어 스냅샷터가 이해하는 형태로 변환
 
 ```mermaid
 flowchart TD
-    subgraph "컴파일 타임"
-        A["blank import plug-in 등록"]
+    subgraph kubelet["kubelet 프로세스"]
+        direction TB
+        SP["SyncPod
+파드 desired state 조정"]
+        GRM["kubeGenericRuntimeManager
+runtimeService 호출 조율"]
+        RRS["RemoteRuntimeService
+CRI gRPC 클라이언트"]
+        CRI_IF["CRI RuntimeService interface
+RunPodSandbox · CreateContainer · StartContainer"]
+
+        SP --> GRM --> RRS --> CRI_IF
     end
 
-    subgraph "프로세스 시작"
-        B["registry.Graph() DFS 위상 정렬 초기화"]
-        C["CRI 서버 기동 대기"]
+    CRI_IF -->|"gRPC (Unix socket)
+/run/containerd/containerd.sock"| GRPC
+
+    subgraph containerd["containerd 프로세스"]
+        direction TB
+        GRPC["GRPCPlugin 'cri'
+CRI gRPC 서버 · 요청 진입점"]
+        CS["criService"]
+
+        subgraph rps["RunPodSandbox"]
+            direction TB
+            N1["① netns 생성
+CLONE_NEWNET + bind mount"]
+            N2["② CNI 플러그인 실행
+veth pair · IP 할당"]
+            N3["③ Controller.Create
+메타데이터 등록"]
+            N4["④ Controller.Start
+pause 컨테이너 Task 기동"]
+            N5["⑤ NRI 훅 · Sandbox Ready 전환"]
+            N1 --> N2 --> N3 --> N4 --> N5
+        end
+
+        subgraph cc["CreateContainer"]
+            direction TB
+            C1["① 이미지 로컬 resolve"]
+            C2["② OCI 스펙 생성
+buildContainerSpec"]
+            C3["③ overlay 스냅샷 준비
+upper / lower dir"]
+            C4["④ bolt DB 저장 · NRI post-create 훅"]
+            C1 --> C2 --> C3 --> C4
+        end
+
+        subgraph sc["StartContainer"]
+            direction TB
+            S1["① NewTask
+OCI 번들 · config.json 생성"]
+            S2["② ShimManager
+shim exec 또는 재사용"]
+            S3["③ NRI start 훅
+CPU 핀닝 · NUMA 정책"]
+            S4["④ task.Start → runc start"]
+            S1 --> S2 --> S3 --> S4
+        end
+
+        SNAP["Snapshotter (overlayfs)
+이미지 레이어 → lower / upper / work dir"]
+
+        GRPC --> CS
+        CS --> rps
+        rps --> cc
+        cc --> sc
+        sc --> SNAP
     end
 
-    subgraph "RunPodSandbox"
-        D["unshare(CLONE_NEWNET) + bind mount netns 생성"]
-        E["CNI 실행 netns 경로 전달"]
-        F["CreateSandbox → StartSandbox 완료"]
-        D --> E --> F
+    SNAP -->|"ttrpc"| shim
+
+    subgraph shim["containerd-shim-runc-v2  (파드당 1개 · systemd 자식)"]
+        direction TB
+        RUNC["runc
+OCI 런타임 · 실행 후 종료"]
+        PROC["컨테이너 프로세스
+pause · app"]
+        RUNC --> PROC
     end
 
-    subgraph "CreateContainer"
-        G["Controller.Create 메타데이터만"]
-        H["스냅샷 디렉터리 준비 mount(2) 없음"]
-        I["Unpack 지연 필요할 때만"]
-        G --> H --> I
-    end
+    N2 -->|"exec"| CNI["CNI plugin binary
+veth · IP · routing 설정"]
 
-    subgraph "StartContainer → shim"
-        J["Controller.Start 실제 실행"]
-        K["mount(2) 수행 shim이 담당"]
-        J --> K
-    end
+    CNI --> KERNEL
+    shim --> KERNEL
 
-    A --> B --> C
-    C --> D
-    F --> G
-    I --> J
+    KERNEL["Linux kernel
+netns · cgroup · overlayfs · namespace"]
 ```
