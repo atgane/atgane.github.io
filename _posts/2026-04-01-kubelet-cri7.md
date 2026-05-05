@@ -21,7 +21,7 @@ header:
 
 이전 포스트에서는 kubelet의 `CreateContainer`와 `StartContainer` 요청이 containerd 내부를 지나 `NewTask()`까지 내려가는 흐름을 추적했습니다. 다만 그 다음 단계, 즉 containerd 내부에서 어디서 `ShimManager.Start()`가 호출되고 거기서 shim 재사용과 새 shim 기동이 어떻게 갈리는지는 충분히 펼쳐 보지 못했습니다. 흐름을 따라가다 보면 `containerd-shim-runc-v2`가 계속 등장하지만, 정작 이 프로세스가 왜 필요하고 내부에서 무엇을 맡는지는 아직 따로 정리하지 못했습니다.
 
-이번 글에서는 바로 그 빈칸을 메우겠습니다. containerd가 shim 프로세스를 어떻게 띄우는지, shim이 내부에서 어떻게 `runc create`와 `runc start`를 호출하는지, 그리고 `runc`가 사라진 뒤에도 shim이 왜 계속 살아 있으면서 컨테이너 종료를 감시하는지를 차례로 살펴보겠습니다. 마지막에는 containerd가 재시작된 뒤 `bootstrap.json`을 바탕으로 기존 shim에 다시 붙는 경로까지 연결하겠습니다.
+이번 글에서는 바로 그 빈칸을 메우겠습니다. containerd가 shim 프로세스를 어떻게 띄우는지, shim이 내부에서 어떻게 `runc create`와 `runc start`를 호출하는지, 그리고 `runc`가 사라진 뒤에도 shim이 왜 계속 살아 있으면서 컨테이너 종료를 감시하는지를 차례로 살펴보겠습니다.
 
 ---
 
@@ -453,7 +453,7 @@ func SocketAddress(ctx context.Context, socketPath, id string, debug bool) (stri
 5. containerd는 그 stdout을 읽어 접속 정보를 파싱하고 `bootstrap.json`에 기록한 뒤 장수 shim endpoint에 붙습니다.
 6. 두 번째 프로세스는 이제 `run(action="")` 경로로 들어가 장수 shim 서버 초기화를 계속 진행합니다.
 
-여기서 `bootstrap.json`에는 방금 확보한 shim endpoint 정보가 기록됩니다. 이 파일이 재시작 뒤 재연결에 어떻게 쓰이는지는 뒤 `Shim 재연결` 절에서 다시 보겠습니다.
+여기서 `bootstrap.json`에는 방금 확보한 shim endpoint 정보가 기록됩니다. 이 파일은 이후 shim 복구 경로의 핵심 입력이 되지만, 그 복구 절차 자체는 별도 글에서 다루겠습니다.
 
 stdout 응답이 구버전 shim일 수도 있기 때문에 containerd는 파싱도 약간 보수적으로 합니다.
 
@@ -1323,160 +1323,7 @@ func (c *criService) RunPodSandbox(ctx context.Context, r *runtime.RunPodSandbox
 }
 ```
 
----
-
-## Shim 재연결: containerd 재시작 시
-
-앞 절에서 본 전달 경로가 재시작 상황에서도 이어지려면, containerd가 살아 있는 shim의 endpoint를 잃지 않아야 합니다. 이 부분도 요약 화살표 대신 실제 복구 코드를 그대로 보는 편이 좋습니다.
-
-```go
-// https://github.com/containerd/containerd/blob/dea7da592f5d1/core/runtime/v2/task_manager.go#L135
-func NewTaskManager(ctx context.Context, root, state string, shims *ShimManager) (*TaskManager, error) {
-	if err := shims.LoadExistingShims(ctx, state, root); err != nil {
-		return nil, fmt.Errorf("failed to load existing shims for task manager")
-	}
-	// ...
-}
-
-// https://github.com/containerd/containerd/blob/dea7da592f5d1/core/runtime/v2/shim_load.go#L53
-func (m *ShimManager) LoadExistingShims(ctx context.Context, stateDir string, rootDir string) error {
-	// ...
-	if err := m.loadShims(namespaces.WithNamespace(ctx, ns), stateDir); err != nil { // ✅ shim 복구 루프 시작
-		// ...
-	}
-	// ...
-}
-
-func (m *ShimManager) loadShims(ctx context.Context, stateDir string) error {
-	// ...
-	if err := m.loadShim(ctx2, bundle); err != nil { // ✅ 각 bundle마다 loadShim()으로 재연결 시도
-		// ...
-	}
-	// ...
-}
-
-func loadShimTask(ctx context.Context, bundle *Bundle, onClose func()) (_ *shimTask, retErr error) {
-	shim, err := loadShim(ctx, bundle, onClose)
-	if err != nil {
-		return nil, err
-	}
-	s, err := newShimTask(shim) // ✅ shim client 객체 생성
-	if err != nil {
-		return nil, err
-	}
-	if _, err := s.PID(ctx); err != nil {
-		// ...
-	}
-	return s, nil
-}
-
-// https://github.com/containerd/containerd/blob/dea7da592f5d1/core/runtime/v2/shim.go#L108
-func loadShim(ctx context.Context, bundle *Bundle, onClose func()) (_ ShimInstance, retErr error) {
-	// ...
-	params, err := restoreBootstrapParams(bundle.Path)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read bootstrap.json when restoring bundle %q: %w", bundle.ID, err)
-	}
-
-	conn, err := makeConnection(ctx, bundle.ID, params, onCloseWithShimLog)
-	if err != nil {
-		return nil, fmt.Errorf("unable to make connection: %w", err)
-	}
-	// ...
-}
-```
-
-즉 containerd 재시작 뒤의 재연결은 `bootstrap.json`을 갑자기 읽는 고립된 코드가 아니라, task manager 초기화 시점의 shim 복구 루프 안에서 실행됩니다.
-
-```go
-// https://github.com/containerd/containerd/blob/dea7da592f5d1/core/runtime/v2/task_manager.go#L135
-func NewTaskManager(ctx context.Context, root, state string, shims *ShimManager) (*TaskManager, error) {
-	if err := shims.LoadExistingShims(ctx, state, root); err != nil {
-		return nil, fmt.Errorf("failed to load existing shims for task manager")
-	}
-	// ...
-}
-```
-
-```go
-// https://github.com/containerd/containerd/blob/dea7da592f5d1/core/runtime/v2/shim_load.go#L115-L119
-func (m *ShimManager) loadShims(ctx context.Context, stateDir string) error {
-	// ...
-	if err := m.loadShim(ctx2, bundle); err != nil {
-		// ...
-	}
-}
-```
-
-즉 containerd가 다시 올라오면 state directory를 훑으면서 기존 bundle들을 찾고, 각 bundle마다 살아 있는 shim에 다시 연결을 시도합니다. 이때 핵심 단서가 `bootstrap.json`입니다.
-
-앞서 bootstrap 단계에서 `binary.Start()`가 이 파일을 써 두었기 때문에, 재시작 뒤에는 새 shim을 다시 띄울 필요 없이 같은 endpoint에 재접속할 수 있습니다.
-
-그 핵심 읽기 함수가 바로 아래입니다.
-
-```go
-// https://github.com/containerd/containerd/blob/dea7da592f5d1/core/runtime/v2/shim_manager.go#L313
-func restoreBootstrapParams(bundlePath string) (shimbinary.BootstrapParams, error) {
-	filePath := filepath.Join(bundlePath, "bootstrap.json")
-
-	if _, err := os.Stat(filePath); err == nil {
-		return readBootstrapParams(filePath) // ✅ 이미 있으면 그대로 복원
-	}
-
-	address, err := shimbinary.ReadAddress(filepath.Join(bundlePath, "address"))
-	if err != nil {
-		return shimbinary.BootstrapParams{}, err
-	}
-
-	params := shimbinary.BootstrapParams{
-		Version:  2,
-		Address:  address,
-		Protocol: "ttrpc", // ✅ 구버전 shim이면 address 파일에서 migration
-	}
-
-	if err := writeBootstrapParams(filePath, params); err != nil {
-		return shimbinary.BootstrapParams{}, err
-	}
-	return params, nil
-}
-```
-
-재시작 뒤 containerd는 `loadShim()`에서 이 정보를 읽고 다시 연결 객체를 만듭니다.
-
-```go
-// https://github.com/containerd/containerd/blob/dea7da592f5d1/core/runtime/v2/shim.go#L108
-func loadShim(ctx context.Context, bundle *Bundle, onClose func()) (_ ShimInstance, retErr error) {
-	// ...
-	params, err := restoreBootstrapParams(bundle.Path)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read bootstrap.json when restoring bundle %q: %w", bundle.ID, err)
-	}
-
-	// ...
-	conn, err := makeConnection(ctx, bundle.ID, params, onCloseWithShimLog) // ✅ 살아 있는 shim 소켓에 재접속
-	if err != nil {
-		return nil, fmt.Errorf("unable to make connection: %w", err)
-	}
-
-	address := fmt.Sprintf("%s+%s", params.Protocol, params.Address)
-	return &shim{bundle: bundle, client: conn, address: address, version: params.Version}, nil
-}
-```
-
-실제로는 여기서 끝이 아니라 `loadShimTask()`가 이어서 shim client를 만들고 `PID()` 호출까지 해 보면서 연결이 살아 있는지도 검증합니다. 즉 재연결은 "주소 문자열만 읽어 두는 것"이 아니라, 실제 shim endpoint에 붙어서 task service가 응답하는지까지 확인하는 복구 과정입니다.
-
-따라서 containerd 재시작 이후의 복원은 "컨테이너를 다시 실행한다"가 아닙니다. 더 정확히는 "이미 살아 있는 shim과 컨테이너에 다시 control plane을 연결한다"입니다.
-
-이 관점에서 보면 shim은 데이터 플레인에 매우 가까운 프로세스입니다. kubelet과 containerd가 control plane 역할을 한다면, shim은 실제 실행 상태와 가장 가까운 곳에서 다음 정보를 붙들고 있습니다.
-
-- 컨테이너 pid
-- stdio/FIFO
-- rootfs 및 bundle 경로
-- exec 프로세스 목록
-- exit status와 종료 시각
-- containerd가 다시 붙을 수 있는 ttrpc endpoint
-
-이제 전체 흐름을 한 번 묶어 보면, shim이 왜 별도 프로세스로 존재해야 하는지가 더 또렷해집니다.
+여기까지의 흐름만으로도 shim이 bootstrap 이후에도 별도 프로세스로 남아 있어야 하는 이유는 충분히 드러납니다.
 
 ---
 
@@ -1489,9 +1336,9 @@ func loadShim(ctx context.Context, bundle *Bundle, onClose func()) (_ ShimInstan
 - 감시: subreaper와 `wait4()` 루프로 descendant 종료를 수거합니다.
 - 전달: `Wait` 응답과 `TaskExit`를 통해 종료 상태를 위 계층으로 올려 보냅니다.
 
-앞에서 살펴본 bootstrap, `CreateTask`와 `StartTask`, subreaper/reaper, 재연결 경로가 모두 이 네 단계를 중심으로 맞물립니다.
+앞에서 살펴본 bootstrap, `CreateTask`와 `StartTask`, subreaper/reaper, `Wait`와 이벤트 전달 경로가 모두 이 네 단계를 중심으로 맞물립니다.
 
-shim은 `runc`가 떠난 뒤에도 남아 실행 상태를 붙들고, descendant 종료를 수거하고, `Wait`와 이벤트를 통해 상태를 올리고, 재시작 뒤 다시 붙을 수 있는 endpoint를 유지하는 역할을 수행합니다. 그래서 containerd가 재시작되어도 컨테이너가 곧바로 사라지지 않고, 재연결 뒤 다시 제어를 회복할 수 있습니다.
+shim은 `runc`가 떠난 뒤에도 남아 실행 상태를 붙들고, descendant 종료를 수거하고, `Wait`와 이벤트를 통해 상태를 위 계층으로 올리는 역할을 수행합니다. 그래서 shim이 단순 bootstrap helper가 아니라, 컨테이너 수명과 가장 가까운 곳에서 장기 책임을 맡는 별도 프로세스라는 점이 선명해집니다.
 
 다음 편에서는 이 shim이 pause sandbox와 일반 workload container를 어떤 단위로 묶고, pod 내부의 여러 컨테이너를 하나의 shim 아래에서 어떻게 관리하는지 더 이어서 정리해 보겠습니다.
 
