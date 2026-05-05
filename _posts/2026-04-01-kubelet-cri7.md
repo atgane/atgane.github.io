@@ -45,6 +45,8 @@ var groupLabels = []string{
 
 즉, 오늘날 CRI의 기본 그림은 "컨테이너마다 shim 하나"보다 "pod sandbox마다 shim 하나"에 더 가깝습니다. 정확히는 shim이 sandbox API version 3 이상을 지원할 때 그렇고, 구버전 shim이면 containerd는 다시 shim 바이너리를 직접 띄우는 보수적 경로로 돌아갑니다.
 
+다만 여기서 pod 단위로 묶이는 대상을 task나 bundle로 읽으면 안 됩니다. runtime v2 task manager가 다루는 task와 OCI bundle은 여전히 개별 task 기준이며, CRI의 일반 workload container 경로에서는 사실상 container ID 기준입니다. pod 단위로 공유되는 것은 shim endpoint 쪽이고, 각 container task는 자기 bundle을 가진 채 그 endpoint에 붙습니다.
+
 이제 이 배경을 실제 호출 흐름 위에 얹어 보겠습니다. 이전 포스트의 `Task 생성 — shim 기동과 OCI 번들 준비`에서 보았던 `container.NewTask()` 호출이 바로 이 흐름의 입구입니다.
 
 ```go
@@ -88,6 +90,8 @@ func (s *service) Create(ctx context.Context, r *api.CreateTaskRequest) (*api.Cr
 ```
 
 그 다음 `local.Create()`가 CRI 요청을 `TaskManager`가 이해하는 `runtime.CreateOpts`로 변환한 뒤, 실제 runtime 구현인 `rtime.Create()`를 호출합니다.
+
+여기서도 단위를 한 번 고정해 두는 편이 좋습니다. 아래 호출에서 `rtime.Create(ctx, r.ContainerID, opts)`로 내려가는 값이 runtime v2 쪽의 `taskID`가 되고, 이어서 `TaskManager.Create()`는 그 `taskID`로 bundle을 만듭니다. 즉 CRI의 일반 workload container 경로에서는 task와 bundle이 pod 기준이 아니라 container 기준으로 만들어집니다.
 
 ```go
 // https://github.com/containerd/containerd/blob/dea7da592f5d1/plugins/services/tasks/local.go#L161-L255
@@ -215,6 +219,10 @@ func (m *ShimManager) Start(ctx context.Context, id string, bundle *Bundle, opts
 ## Shim 바이너리 기동 흐름
 
 앞 절에서는 shim이 왜 필요한지와 `ShimManager.Start()`의 분기까지 확인했습니다. 이제부터는 그중에서도 `return m.startShim(ctx, bundle, id, opts)`로 내려가는 "새 shim 기동" 경로만 따로 떼어서 보겠습니다.
+
+다만 이 절은 `ShimManager.Start()`의 모든 경우를 대표하는 기본 경로가 아니라, 새 shim 프로세스를 실제로 띄우는 분기만 확대해서 보는 것입니다. sandbox-aware shim version 3 이상인 현재 CRI 기본 경로에서는 일반 workload container가 여기로 매번 내려오지 않습니다. 그런 container들은 바로 앞에서 본 `!shouldInvokeShimBinary` 경로로 기존 pod sandbox shim의 bootstrap 정보를 가져와 자기 bundle에 기록한 뒤, 같은 shim endpoint에 재연결합니다.
+
+즉, 새 shim 기동이 중심이 되는 경우는 pause sandbox 자체를 처음 만들 때나, 구버전 shim 또는 호환성 fallback 때문에 containerd가 새 shim 바이너리를 다시 띄워야 할 때라고 이해하시는 편이 정확합니다.
 
 ```go
 // https://github.com/containerd/containerd/blob/dea7da592f5d1/core/runtime/v2/task_manager.go#L199

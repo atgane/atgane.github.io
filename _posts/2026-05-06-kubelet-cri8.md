@@ -56,8 +56,7 @@ func (m *ShimManager) LoadExistingShims(ctx context.Context, stateDir string, ro
 	}
 	for _, nsd := range nsDirs {
 		// ...
-		if err := m.loadShims(namespaces.WithNamespace(ctx, ns), stateDir); err != nil {
-			// ✅ network namespace 단위로 shim 디렉토리 순회
+		if err := m.loadShims(namespaces.WithNamespace(ctx, ns), stateDir); err != nil { // ✅ containerd namespace를 고정한 뒤 그 아래 bundle들을 복구
 			continue
 		}
 		if err := m.cleanupWorkDirs(namespaces.WithNamespace(ctx, ns), rootDir); err != nil {
@@ -69,15 +68,13 @@ func (m *ShimManager) LoadExistingShims(ctx context.Context, stateDir string, ro
 }
 ```
 
-즉 containerd는 state directory 아래 namespace들을 먼저 순회하고, 그 안에서 기존 bundle들을 다시 살펴봅니다. 복구가 한 컨테이너의 API 호출에 종속되는 것이 아니라, 프로세스 재기동 직후의 초기화 루프에 묶여 있다는 점이 중요합니다.
+여기서 먼저 도는 것은 컨테이너 디렉터리가 아니라 containerd namespace 디렉터리입니다. 즉 `LoadExistingShims()`의 첫 단계는 `stateDir` 바로 아래에서 `k8s.io`, `default` 같은 namespace를 고르고, 실제 task/container bundle 복구는 그 다음 `loadShims()` 안에서 `stateDir/<namespace>/` 아래 항목들을 다시 순회하면서 일어납니다. 여기서 말하는 namespace는 `ip netns`에 보이는 리눅스 네트워크 namespace가 아니라 containerd metadata namespace입니다. 복구가 한 컨테이너의 API 호출에 종속되는 것이 아니라, 프로세스 재기동 직후의 초기화 루프에 묶여 있다는 점이 중요합니다.
 
-여기서 `stateDir`는 기본 구성에서 대략 `/run/containerd/io.containerd.runtime.v2.task`입니다.
-
-실제 시스템에서는 두 층으로 확인하시면 됩니다. 먼저 `containerd config dump | grep '^state'`로 daemon의 `config.State` 값을 보고, 그다음 그 아래 task plugin 디렉터리와 namespace 하위를 확인하면 됩니다. 기본값이라면 `ls /run/containerd/io.containerd.runtime.v2.task/` 아래에 namespace 디렉터리가 보이고, 그 아래가 다시 task ID별 bundle 디렉터리입니다.
+여기서 `stateDir`는 기본 구성에서 대략 `/run/containerd/io.containerd.runtime.v2.task`입니다. 또 kubernetes는 containerd를 `k8s.io` namespace로 띄우는 게 일반적이므로, 실제 복구 대상 디렉터리는 `/run/containerd/io.containerd.runtime.v2.task/k8s.io/`가 됩니다. 이 아래에 pod sandbox나 workload container 단위로 bundle 디렉터리가 놓이는 형태입니다.
 
 ## bundle 단위 재연결과 bootstrap.json 복구
 
-namespace에 들어간 뒤에는 bundle 단위로 복구가 진행됩니다. 여기서 중요한 것은 `loadShims()`가 state directory를 훑고, 각 bundle마다 `m.loadShim(...)`으로 들어간다는 점입니다.
+containerd namespace에 들어간 뒤에는 bundle 단위로 복구가 진행됩니다. 여기서 중요한 것은 `loadShims()`가 state directory를 훑고, 각 bundle마다 `m.loadShim(...)`으로 들어간다는 점입니다.
 
 여기서 pod별 bundle처럼 읽히면 안 됩니다. runtime v2 task manager가 만드는 bundle은 기본적으로 task ID별이며, CRI의 일반 workload container 경로에서는 사실상 container ID별입니다. 실제 생성 호출도 `TaskManager.Create()`가 `NewBundle(ctx, m.root, m.state, taskID, opts.Spec)`를 부르는 형태입니다.
 
@@ -100,7 +97,11 @@ func (m *TaskManager) Create(ctx context.Context, taskID string, opts runtime.Cr
 }
 ```
 
-다만 sandbox-aware shim에서는 여러 컨테이너가 같은 pod sandbox shim을 공유할 수 있습니다. 이 경우 pod 단위로 공유되는 것은 bundle이 아니라 shim endpoint입니다. `ShimManager.Start()`는 `opts.SandboxID`가 있을 때 기존 sandbox shim의 bootstrap 정보를 가져와 현재 task의 bundle에 `bootstrap.json`과 `sandbox` 파일을 써 두고, 그 bundle을 통해 같은 shim에 다시 붙습니다.
+다만 sandbox-aware shim에서는 여러 컨테이너가 같은 pod sandbox shim을 공유할 수 있습니다. 이 경우 pod 단위로 공유되는 것은 bundle이 아니라 shim endpoint입니다. `ShimManager.Start()`는 `opts.SandboxID`가 있을 때 기존 sandbox shim의 bootstrap 정보를 가져와 현재 task의 bundle에 `bootstrap.json`과 `sandbox` 파일을 써 둡니다.
+
+이 지점이 재시작 복구를 이해할 때 가장 중요합니다. containerd는 재시작 뒤에 각 컨테이너마다 다시 "이 컨테이너가 어느 sandbox에 속하는가", "그 sandbox를 담당하는 shim endpoint가 무엇인가"를 단계적으로 재추론하지 않습니다. 그 작업은 컨테이너 생성 시점에 이미 끝납니다. 일반 workload container가 sandbox-aware shim에 붙을 때는 `opts.SandboxID`로 sandbox를 식별하고, `m.Get(ctx, opts.SandboxID)`로 기존 sandbox shim을 찾은 뒤, 그 shim의 bootstrap 정보를 현재 container bundle의 `bootstrap.json`에도 그대로 복제합니다. 그래서 재시작 뒤 `LoadExistingShims()`는 각 container bundle을 하나씩 열기만 해도 됩니다. `loadShim()`은 그 bundle의 `bootstrap.json`만 읽어 바로 담당 shim endpoint에 다시 연결합니다.
+
+즉 복구 시점에 필요한 정보는 "sandbox container를 다시 찾는 절차"가 아니라 "각 bundle 안에 이미 남아 있는 endpoint 정보"입니다. 여러 컨테이너가 같은 sandbox shim을 공유하는 경우에는 서로 다른 bundle 디렉터리가 각각 자기 `bootstrap.json`을 갖되, 그 안의 endpoint 값이 같은 shim을 가리키게 됩니다. 참고로 v2.2.1 기준으로 `sandbox` 파일은 이 컨테이너가 어느 sandbox에 속하는지 기록해 두는 용도이고, `LoadExistingShims()`가 재시작 복구 중에 다시 읽는 파일은 아닙니다.
 
 ```go
 // https://github.com/containerd/containerd/blob/dea7da592f5d1/core/runtime/v2/shim_manager.go#L169-L243
