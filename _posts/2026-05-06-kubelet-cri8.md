@@ -1,6 +1,6 @@
 ---
 title: "kubernetes data plane: containerd shim 재연결과 bootstrap.json 복구 경로"
-date: 2026-04-02 00:00:00 +0900
+date: 2026-05-06 00:00:00 +0900
 categories:
   - containerd
 tags:
