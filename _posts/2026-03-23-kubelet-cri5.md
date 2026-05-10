@@ -18,19 +18,30 @@ header:
   teaser: /assets/images/posts/kubernetes.png
 ---
 
-2편에서는 `RunPodSandbox`가 netns를 생성하고 CNI를 구성한 뒤 shim을 기동하여 pause 컨테이너를 실행하는 과정을 살펴봤습니다. 이번 편에서는 이 샌드박스 위에서 실행되는 `CreateContainer`와 `StartContainer`를 추적합니다. 두 메서드가 어떻게 역할을 나누어 컨테이너 프로세스를 준비하고 실행하는지 단계별로 살펴보겠습니다.
+이전 편에서는 `RunPodSandbox`가 netns를 생성하고 CNI를 구성한 뒤 shim을 기동하여 pause 컨테이너를 실행하는 과정을 살펴봤습니다. 이번 편은 다음 단계입니다. kubelet은 샌드박스가 준비되면 각 워크로드 컨테이너에 대해 먼저 `CreateContainer`, 그 다음 `StartContainer`를 호출합니다.
+
+이 두 메서드는 이름이 비슷해서 한 덩어리처럼 보이지만, 실제 역할은 분명하게 갈립니다. `CreateContainer`는 컨테이너 실행에 필요한 메타데이터와 파일시스템 레이어를 준비하는 단계이고, `StartContainer`는 그 준비물을 바탕으로 task를 만들고 실제 컨테이너 프로세스를 시작하는 단계입니다. 이 구분을 먼저 잡아두면 이후 코드가 훨씬 자연스럽게 읽힙니다.
+
+이번 글은 다음 질문을 따라가겠습니다.
+
+- `CreateContainer`가 끝났을 때 정확히 무엇이 준비되어 있는가
+- `StartContainer`는 그 준비물을 어디서 꺼내 실제 실행으로 연결하는가
+
+또한 아래를 가정합니다: 
+
+CreateContainer가 호출되기 전에 kubelet은 이미 PullImage로 이미지를 받아두었습니다. 따라서 이 글에서 LocalResolve가 등장할 때는 content store에 레이어가 존재한다는 전제입니다.
 
 ---
 
 ## CreateContainer
 
-`CreateContainer`는 이미 실행 중인 샌드박스에 컨테이너를 추가하는 메서드입니다. 이 단계에서는 프로세스를 아직 실행하지 않으며, 이미지 스냅샷과 OCI 스펙, IO 파이프 등 실행에 필요한 리소스만 준비합니다.
+`CreateContainer`는 이미 실행 중인 샌드박스 안에 새 컨테이너를 등록하는 단계입니다. 아직 프로세스를 만들지는 않지만, 나중에 `StartContainer`가 곧바로 사용할 수 있도록 이미지 스냅샷, OCI 스펙, IO 파이프, 컨테이너 메타데이터를 미리 준비합니다. 따라서 이 절의 핵심은 "어디까지가 준비이고, 무엇이 아직 실행되지 않았는가"를 구분해서 보는 것입니다.
 
-구현은 `internal/cri/server/container_create.go`의 `criService.CreateContainer`에 있습니다.
+구현은 `internal/cri/server/container_create.go`의 `criService.CreateContainer`에 있습니다. 흐름은 크게 샌드박스 확인 → 이미지와 스펙 준비 → 스냅샷 생성 → store 등록 순서로 진행됩니다.
 
 ### 샌드박스 조회와 컨테이너 ID 예약
 
-먼저 요청에 담긴 샌드박스 ID로 인메모리 store를 조회하여 이미 실행 중인 샌드박스를 가져옵니다. 이 시점에서 샌드박스의 pause 프로세스 PID를 읽어두는데, 이후 net/IPC/UTS 네임스페이스 공유 경로(`/proc/<pid>/ns/...`)를 구성할 때 반드시 필요하기 때문입니다. 그 다음 컨테이너 ID를 생성하고 이름 충돌을 방지하기 위해 이름 인덱스에 예약합니다.
+가장 먼저 해야 할 일은 이 컨테이너가 합류할 샌드박스를 확정하는 것입니다. 같은 파드의 네임스페이스를 공유해야 하므로, containerd는 요청에 담긴 샌드박스 ID로 인메모리 store를 조회하고 pause 프로세스 PID를 확보합니다. 이 PID는 이후 net/IPC/UTS 네임스페이스 공유 경로(`/proc/<pid>/ns/...`)를 만들 때 필요합니다. 이어서 새 컨테이너 ID를 생성하고 이름 인덱스에 예약해, 이후 단계에서 사용할 식별자를 먼저 고정합니다.
 
 ```go
 // https://github.com/containerd/containerd/blob/v2.2.1/internal/cri/server/container_create.go#L57
@@ -48,7 +59,7 @@ func (c *criService) CreateContainer(ctx context.Context, r *runtime.CreateConta
 
 ### 이미지 해석과 스냅샷 생성
 
-컨테이너 스펙에 명시된 이미지 레퍼런스를 로컬 이미지 store에서 해석하고 containerd Image 객체로 변환합니다. 이 이미지 객체와 샌드박스 PID, netns 경로를 묶어 `createContainer`로 넘깁니다. `createContainer` 내부에서는 OCI 스펙 생성 → IO FIFO 파이프 초기화 → overlay 스냅샷 생성 → `NewContainer` 호출 순으로 진행됩니다. 이 중 `NewContainer`가 `ContainerService().Create()`를 호출하여 spec을 포함한 컨테이너 메타데이터를 bolt DB에 트랜잭션으로 영구 저장합니다. `/run` 하위의 `config.json`은 이 시점이 아니라 `StartContainer`의 `NewTask → NewBundle` 단계에서 bolt DB를 읽어 파일로 내립니다.
+샌드박스와 식별자가 준비되면, 다음 관심사는 "이 컨테이너를 어떤 이미지와 어떤 rootfs 위에서 실행할 것인가"입니다. containerd는 컨테이너 스펙에 적힌 이미지 레퍼런스를 로컬 이미지 store에서 해석해 `containerd.Image` 객체로 바꾼 뒤, 이를 샌드박스 PID와 netns 경로와 함께 `createContainer`로 넘깁니다. `createContainer` 내부에서는 OCI 스펙 생성 → IO FIFO 파이프 초기화 → overlay 스냅샷 생성 → `NewContainer` 호출 순으로 진행됩니다. 이 중 `NewContainer`가 `ContainerService().Create()`를 호출하여 spec을 포함한 컨테이너 메타데이터를 bolt DB에 트랜잭션으로 영구 저장합니다. 반면 `/run` 하위의 `config.json`은 아직 만들어지지 않으며, `StartContainer`의 `NewTask → NewBundle` 단계에서 bolt DB에 저장된 spec을 읽어 파일로 내려갑니다.
 
 ```go
 // https://github.com/containerd/containerd/blob/v2.2.1/internal/cri/server/container_create.go#L167
@@ -93,9 +104,7 @@ func (c *criService) createContainer(r *createContainerRequest) (_ string, retEr
     // ✅ ContainerService().Create() → bolt DB 트랜잭션으로 spec 포함 컨테이너 메타데이터 영구 저장
 ```
 
-`NewContainer`는 opt 목록을 순차적으로 적용하는데, 이 중 `customopts.WithNewSnapshot`이 실제로 파일시스템 레이어를 디스크에 구성하는 역할을 담당합니다. 이것이 스냅샷터가 담당하는 영역입니다.
-
-스냅샷터의 책임은 세 가지로 요약됩니다.
+`NewContainer`는 opt 목록을 순차적으로 적용하는데, 이 중 `customopts.WithNewSnapshot`이 실제로 파일시스템 레이어를 디스크에 구성하는 역할을 담당합니다. 여기서부터는 흐름이 잠깐 스냅샷터 내부로 내려갑니다. 다만 독자 입장에서는 스냅샷터가 아래 세 가지를 담당한다고 잡고 보면 전체 흐름이 잘 정리됩니다.
 
 - content store에 보관된 압축 tar 형태의 이미지 레이어를 읽기 전용 디렉터리로 추출하는 이미지 레이어 언팩(lower dir 생성)
 - 컨테이너마다 쓰기 변경사항을 기록하는 writable 디렉터리를 생성하는 컨테이너 쓰기 레이어(upper dir 생성)
@@ -162,7 +171,7 @@ func applyLayers(...) error {
 
 #### 컨테이너 쓰기 레이어 준비 (Prepare)
 
-이미지 레이어가 모두 committed 상태가 되면, `withNewSnapshot`은 컨테이너 ID를 key, 최상위 이미지 체인 ID를 parent로 하여 다시 `s.Prepare`를 호출합니다.
+이미지 레이어가 lower dir로 모두 준비되면, 그 위에 컨테이너 전용 쓰기 레이어를 얹을 차례입니다. 이를 위해 `withNewSnapshot`은 컨테이너 ID를 key, 최상위 이미지 체인 ID를 parent로 하여 다시 `s.Prepare`를 호출합니다.
 
 ```go
 // https://github.com/containerd/containerd/blob/dea7da592f5d1/client/container_opts.go#L237
@@ -234,6 +243,8 @@ func (o *snapshotter) mounts(s storage.Snapshot, info snapshots.Info) []mount.Mo
 
 ### 컨테이너 store 등록과 이벤트 발송
 
+여기까지 오면 파일시스템과 스펙 준비는 끝났습니다. 하지만 `CreateContainer`의 목적은 단순히 디스크에 흔적을 남기는 데서 끝나지 않습니다. 바로 이어질 `StartContainer`가 이 결과를 즉시 찾을 수 있도록, containerd는 준비된 컨테이너 객체를 자신의 관리 store에도 등록합니다.
+
 `NewContainer`로 bolt DB에 저장된 컨테이너 객체를 인메모리 container store에도 등록하여 이후 `StartContainer`에서 빠르게 조회할 수 있도록 합니다. 등록 후에는 `CONTAINER_CREATED` 이벤트를 발송하고 NRI post-create 훅을 실행합니다. 이 시점까지 컨테이너 프로세스는 생성되지 않으며, 실제 실행은 kubelet이 `StartContainer`를 호출할 때 이루어집니다.
 
 ```go
@@ -259,15 +270,15 @@ func (c *criService) createContainer(r *createContainerRequest) (_ string, retEr
 
 ## StartContainer
 
-`StartContainer`는 `CreateContainer`에서 준비된 컨테이너를 실제로 실행하는 메서드입니다. containerd task를 생성하여 shim을 통해 runc에 컨테이너 프로세스를 기동하도록 요청합니다.
+이제 `CreateContainer`가 준비해 둔 결과물을 실제 실행으로 넘길 차례입니다. `StartContainer`는 containerd task를 만들고, shim을 통해 `runc create`와 `runc start`를 이어 붙여 컨테이너 프로세스를 기동합니다. 앞 절이 준비 단계였다면, 이 절은 실제 프로세스로 바꾸는 단계입니다.
 
-구현은 `internal/cri/server/container_start.go`의 `criService.StartContainer`에 있습니다.
+구현은 `internal/cri/server/container_start.go`의 `criService.StartContainer`에 있습니다. 이 절에서는 상태 검증 → task 생성 → 프로세스 시작 순서로 따라가면 흐름이 가장 자연스럽습니다.
 
 ### 상태 검증과 IO 로거 설정
 
-`StartContainer`가 호출되면 가장 먼저 컨테이너가 올바른 상태인지 검증합니다. `setContainerStarting`은 컨테이너가 `CONTAINER_CREATED` 상태일 때만 Starting 플래그를 설정하며, 이미 실행 중이거나 종료된 컨테이너에 대한 중복 호출을 원천 차단합니다. 이와 함께 샌드박스가 아직 `StateReady`인지도 확인합니다. pause 컨테이너가 종료된 뒤에는 네트워크 네임스페이스가 사라지므로, 새 컨테이너를 그 네임스페이스에 합류시키는 것이 불가능하기 때문입니다.
+실행 직전에 containerd가 먼저 확인하는 것은 단순합니다. "지금 이 컨테이너를 시작해도 되는가"입니다. `setContainerStarting`은 컨테이너가 `CONTAINER_CREATED` 상태일 때만 Starting 플래그를 설정하며, 이미 실행 중이거나 종료된 컨테이너에 대한 중복 호출을 원천 차단합니다. 이와 함께 샌드박스가 아직 `StateReady`인지도 확인합니다. pause 컨테이너가 종료된 뒤에는 네트워크 네임스페이스가 사라지므로, 새 컨테이너를 그 네임스페이스에 합류시키는 것 자체가 불가능하기 때문입니다.
 
-상태 검증이 끝나면 IO 로거를 준비합니다. `CreateContainer` 단계에서 stdout/stderr FIFO 파이프를 생성해 두었는데, 이 시점에 그 FIFO를 실제 로그 파일과 연결합니다. `createContainerLoggers`는 `meta.LogPath`에 해당하는 로그 파일을 열고, FIFO에서 읽어 파일에 쓰는 리다이렉션 고루틴을 백그라운드에서 시작합니다.
+이 검증이 끝나면 IO 로거를 준비합니다. `CreateContainer` 단계에서 stdout/stderr FIFO 파이프를 이미 만들어 두었기 때문에, 여기서는 그 FIFO를 실제 로그 파일과 연결하면 됩니다. `createContainerLoggers`는 `meta.LogPath`에 해당하는 로그 파일을 열고, FIFO에서 읽어 파일에 쓰는 리다이렉션 고루틴을 백그라운드에서 시작합니다.
 
 ```go
 // https://github.com/containerd/containerd/blob/v2.2.1/internal/cri/server/container_start.go#L45
@@ -295,11 +306,11 @@ func (c *criService) StartContainer(ctx context.Context, r *runtime.StartContain
 
 ### Task 생성 — shim 기동과 OCI 번들 준비
 
-`container.NewTask`는 containerd에서 실행 단위인 Task를 생성합니다. 내부적으로는 bolt DB에 저장된 컨테이너 메타데이터(spec 포함)를 읽어 `/run/containerd/io.containerd.runtime.v2.task/<namespace>/<id>/` 하위에 OCI 번들(`config.json`, rootfs 마운트 등)을 구성하고, shim 프로세스를 통해 `runc create`를 실행합니다. 이 단계는 프로세스를 시작하는 것이 아니라 컨테이너 환경(cgroup, 네임스페이스, rootfs)을 초기화하는 단계입니다.
+여기서부터 `CreateContainer`가 남겨 둔 메타데이터가 실행 단위로 바뀝니다. `container.NewTask`는 bolt DB에 저장된 컨테이너 메타데이터(spec 포함)를 읽어 `/run/containerd/io.containerd.runtime.v2.task/<namespace>/<id>/` 하위에 OCI 번들(`config.json`, rootfs 마운트 등)을 구성하고, shim 프로세스를 통해 `runc create`를 실행합니다. 즉, 독자 입장에서는 이 지점을 "저장된 준비물이 실제 실행 환경으로 변환되는 경계"로 이해하면 됩니다. 다만 이 단계는 아직 프로세스를 시작하는 것이 아니라, 컨테이너 환경(cgroup, 네임스페이스, rootfs)을 초기화하는 단계입니다.
 
 sandbox의 `Endpoint`가 유효하면 별도 shim을 새로 기동하지 않고 기존 샌드박스 shim의 API 엔드포인트를 재사용합니다. Kata Containers처럼 VM 기반 런타임에서는 모든 컨테이너가 같은 VM 위에서 동작해야 하므로, 하나의 shim이 샌드박스 전체의 생명주기를 담당합니다. 일반 runc 환경에서도 같은 파드 내 컨테이너들은 동일한 shim을 공유하여 불필요한 프로세스 생성을 줄입니다.
 
-`task.Wait`는 이 시점에 task 종료 이벤트를 구독하는 채널을 미리 확보합니다. `task.Start` 이후에 Wait를 호출하면 컨테이너가 이미 종료되어 이벤트를 놓칠 수 있기 때문에 순서가 중요합니다.
+`task.Wait`는 이 시점에 task 종료 이벤트를 구독하는 채널을 미리 확보합니다. `task.Start` 이후에 Wait를 호출하면 컨테이너가 이미 종료되어 이벤트를 놓칠 수 있기 때문에 순서가 중요합니다. 즉, 번들과 task는 만들어졌지만 프로세스는 아직 달리지 않는, 짧지만 중요한 중간 지점이 여기입니다.
 
 ```go
 // https://github.com/containerd/containerd/blob/v2.2.1/internal/cri/server/container_start.go#L216
@@ -320,7 +331,7 @@ func (c *criService) StartContainer(...) {
 
 ### NRI 훅 실행과 프로세스 시작
 
-`NewTask`(runc create)까지 완료된 시점은 컨테이너 환경이 완전히 초기화되어 있으나 프로세스는 아직 frozen 상태인 중간 단계입니다. NRI `StartContainer` 훅은 바로 이 틈을 활용합니다. OCI 스펙이 확정된 직후, 실제 프로세스 실행 직전이므로 CPU 핀닝이나 메모리 NUMA 정책처럼 실행 전에 반드시 적용되어야 할 리소스 설정을 이 시점에 주입할 수 있습니다.
+바로 그 중간 지점이 NRI가 개입할 수 있는 마지막 순간입니다. `NewTask`(runc create)까지 완료된 시점에는 컨테이너 환경이 완전히 초기화되어 있지만 프로세스는 아직 frozen 상태입니다. NRI `StartContainer` 훅은 이 틈을 활용해 OCI 스펙이 확정된 직후, 실제 프로세스 실행 직전에 CPU 핀닝이나 메모리 NUMA 정책처럼 실행 전에 반드시 적용되어야 할 리소스 설정을 주입할 수 있습니다.
 
 훅이 완료되면 `task.Start`로 `runc start`를 호출하여 frozen 상태의 컨테이너 프로세스를 실제로 실행합니다. 이후 PID와 시작 시각을 store에 기록하고, 종료 이벤트를 감시하는 고루틴을 시작합니다. 마지막으로 `CONTAINER_STARTED` 이벤트를 발송하고 NRI post-start 훅을 실행한 뒤 kubelet에 응답을 반환합니다.
 
@@ -352,7 +363,7 @@ func (c *criService) StartContainer(...) {
 
 # 정리
 
-지금까지 kubelet이 호출하는 CRI 메서드 세 가지의 containerd 내부 동작을 순서대로 살펴봤습니다.
+이 글에서 독자가 마지막에 남겨야 할 흐름은 비교적 단순합니다. `RunPodSandbox`가 파드의 공용 실행 기반을 만들고, `CreateContainer`가 각 컨테이너의 실행 재료를 준비한 뒤, `StartContainer`가 그 재료를 실제 프로세스로 바꿉니다. 세 단계는 이어져 있지만, 각자 담당하는 경계는 분명합니다.
 
 ### RunPodSandbox
 
@@ -366,24 +377,17 @@ func (c *criService) StartContainer(...) {
 
 ### CreateContainer
 
-- 실행 중인 샌드박스를 조회하고 pause 프로세스의 PID를 확보합니다(net/IPC/UTS 네임스페이스 경로 구성에 사용).
-- 컨테이너 ID를 생성하고 이름 충돌을 방지하기 위해 이름 인덱스에 예약합니다.
-- 로컬 이미지 store에서 이미지를 해석하여 containerd Image 객체로 변환합니다.
-- OCI 런타임 스펙을 생성하고, stdout/stderr FIFO 파이프를 초기화합니다.
-- overlay 스냅샷(쓰기 가능 레이어)을 생성하고, `NewContainer`로 spec을 포함한 컨테이너 메타데이터를 bolt DB에 영구 저장합니다.
-- 컨테이너 객체를 인메모리 store에 등록하고, `CONTAINER_CREATED` 이벤트를 발송하며 NRI post-create 훅을 실행합니다.
-- 이 단계에서는 프로세스를 실행하지 않으며, `config.json`도 아직 디스크에 기록되지 않습니다.
+- 이미 준비된 샌드박스를 기준점으로 삼아 pause PID와 네임스페이스 공유 경로를 확보합니다.
+- 이미지 레퍼런스를 해석하고 OCI 런타임 스펙, FIFO 파이프, overlay 스냅샷을 차례로 준비합니다.
+- `NewContainer`로 spec을 포함한 컨테이너 메타데이터를 bolt DB에 영구 저장하고, 인메모리 store에도 등록합니다.
+- `CONTAINER_CREATED` 이벤트와 NRI post-create 훅까지 처리하지만, 이 시점에는 아직 프로세스를 실행하지 않습니다.
+- 즉, 이 단계의 결과물은 "곧 실행할 수 있는 상태로 정리된 메타데이터와 파일시스템"입니다.
 
 ### StartContainer
 
-- container store에서 컨테이너를 조회하고, `CONTAINER_CREATED` 상태인지 검증하여 중복 실행을 차단합니다.
-- 샌드박스가 아직 Ready 상태인지 확인합니다.
-- stdout/stderr FIFO를 로그 파일과 연결하는 리다이렉션 고루틴을 시작합니다.
-- `container.NewTask`로 OCI 번들(`config.json`, rootfs 마운트)을 디스크에 기록하고, shim을 통해 `runc create`를 실행하여 cgroup/네임스페이스/rootfs 환경을 초기화합니다. 같은 파드 내라면 기존 shim을 재사용합니다.
-- `task.Wait`로 종료 이벤트 구독 채널을 미리 확보합니다.
-- NRI `StartContainer` 훅을 실행하여 CPU 핀닝, NUMA 정책 등 실행 전 리소스 조정을 적용합니다.
-- `task.Start`로 `runc start`를 호출하여 frozen 상태의 프로세스를 실제로 실행합니다.
-- PID와 시작 시각을 store에 기록하고, 종료 모니터 고루틴을 시작합니다.
-- `CONTAINER_STARTED` 이벤트를 발송하고 NRI post-start 훅을 실행한 뒤 kubelet에 응답을 반환합니다.
+- 먼저 이 컨테이너가 정말 시작 가능한 상태인지 검증하고, `CreateContainer`에서 만들어 둔 FIFO를 실제 로그 파일과 연결합니다.
+- `container.NewTask`가 bolt DB의 메타데이터를 읽어 OCI 번들과 task를 만들고, shim을 통해 `runc create`를 호출합니다. 같은 파드 안에서는 기존 shim을 재사용할 수도 있습니다.
+- 이 중간 지점에서 `task.Wait`와 NRI `StartContainer` 훅이 개입하여 종료 이벤트 구독과 실행 직전 리소스 조정을 처리합니다.
+- 마지막으로 `task.Start`가 `runc start`를 호출해 frozen 상태의 프로세스를 실제로 실행하고, containerd는 PID 기록, 종료 모니터 등록, `CONTAINER_STARTED` 이벤트 발송까지 마무리합니다.
 
-지금까지 세 CRI 메서드의 내부 동작을 코드 수준으로 살펴봤습니다. 다음 편에서는 이 구현에서 반복적으로 등장하는 설계 패턴들이 왜 이런 형태를 갖게 되었는지, 그 기술적 배경을 살펴봅니다.
+이렇게 나누어 보면 `CreateContainer`와 `StartContainer`의 경계가 분명해집니다. 전자는 "실행 재료를 저장해 두는 단계"이고, 후자는 "저장된 재료를 꺼내 실제 프로세스로 바꾸는 단계"입니다. 다음 편에서는 이 구현에서 반복적으로 등장하는 설계 패턴들이 왜 이런 형태를 갖게 되었는지, 그 기술적 배경을 살펴봅니다.
