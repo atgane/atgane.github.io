@@ -23,7 +23,7 @@ header:
 
 ---
 
-## TaskManager 초기화에서 일어나는 재연결
+# TaskManager 초기화에서 일어나는 재연결
 
 재연결은 나중에 어떤 요청이 들어왔을 때 즉흥적으로 일어나는 동작이 아닙니다. containerd의 runtime v2 task manager가 올라오는 순간, 먼저 기존 shim들을 복구하려고 시도합니다.
 
@@ -72,7 +72,7 @@ func (m *ShimManager) LoadExistingShims(ctx context.Context, stateDir string, ro
 
 여기서 `stateDir`는 기본 구성에서 대략 `/run/containerd/io.containerd.runtime.v2.task`입니다. 또 kubernetes는 containerd를 `k8s.io` namespace로 띄우는 게 일반적이므로, 실제 복구 대상 디렉터리는 `/run/containerd/io.containerd.runtime.v2.task/k8s.io/`가 됩니다. 이 아래에 pod sandbox나 workload container 단위로 bundle 디렉터리가 놓이는 형태입니다.
 
-## bundle 단위로 복구가 진행
+# bundle 단위로 복구 진행
 
 containerd namespace 하나를 고른 뒤 containerd가 실제로 다시 여는 것은 bundle 디렉터리들입니다. 즉 복구의 실질적인 단위는 "namespace 아래의 각 task/container bundle"입니다.
 
@@ -151,7 +151,7 @@ type Bundle struct {
 
 여기까지 읽으면 자연스럽게 질문이 생깁니다. "bundle 디렉터리만 보고 containerd가 어떻게 어떤 shim endpoint에 다시 붙어야 하는지 알 수 있을까?"
 
-## bundle에서 endpoint 정보 확인
+# bundle에서 endpoint 정보 확인
 
 복구 시점에 containerd가 새로 추론하는 것은 많지 않습니다. 핵심 정보는 컨테이너를 처음 만들 때 이미 bundle 안에 기록해 둡니다. 가장 일반적인 경로에서는 shim bootstrap이 끝나는 순간 `bootstrap.json`이 바로 쓰입니다.
 
@@ -189,7 +189,7 @@ func (b *binary) Start(ctx context.Context, opts *types.Any, onClose func()) (_ 
 
 Linux의 `containerd-shim-runc-v2`는 보통 shim endpoint를 `unix:///run/containerd/s/<sha256>` 같은 unix 주소 문자열로 돌려주고, 그 값이 그대로 `bootstrap.json`의 `address` 필드에 저장됩니다. 따라서 해당 필드를 읽으면 재시작 뒤에도 같은 주소로 다시 붙을 수 있습니다.
 
-### shared shim 복구 과정
+## shared shim 복구 과정
 
 한편 sandbox-aware shim의 경우 여러 컨테이너가 같은 pod sandbox shim을 공유한다면, 각 workload container bundle만 보고 어떻게 같은 shim에 다시 붙을 수 있는지 확인할 필요가 있습니다.
 
@@ -235,7 +235,7 @@ func (m *ShimManager) Start(ctx context.Context, id string, bundle *Bundle, opts
 
 참고로 v2.2.1 기준으로 `sandbox` 파일은 이 컨테이너가 어느 sandbox에 속하는지 기록해 두는 용도이고, `LoadExistingShims()`가 재시작 복구 중에 다시 읽는 핵심 입력은 아닙니다. 재연결의 직접 입력은 `bootstrap.json`입니다.
 
-## `restoreBootstrapParams()`를 통한 복구 입력 확보
+# `restoreBootstrapParams()`를 통한 복구 입력 확보
 
 재시작 뒤에는 `restoreBootstrapParams()`가 bundle 아래의 `bootstrap.json`을 읽어 복구에 필요한 `Version`, `Protocol`, `Address`를 되살립니다. 구버전 shim이면 예전 `address` 파일에서 migrate하는 경로도 여기 포함됩니다.
 
@@ -271,7 +271,7 @@ func restoreBootstrapParams(bundlePath string) (shimbinary.BootstrapParams, erro
 
 즉 `bootstrap.json`은 단순 캐시가 아닙니다. containerd가 다시 떠올랐을 때 shim endpoint를 복구하는 기준점이며, 동시에 구버전 shim과의 호환성 migration까지 맡고 있습니다.
 
-## shim endpoint 재연결
+# shim endpoint 재연결
 
 복구 입력을 얻은 뒤 실제 연결을 다시 만드는 곳은 `loadShim()`입니다. 여기서 중요한 점은 새 shim 프로세스를 띄우는 것이 아니라, 기존 bundle 경로에서 복원한 bootstrap 파라미터로 `makeConnection(...)`을 호출한다는 것입니다.
 
@@ -303,7 +303,7 @@ func loadShim(ctx context.Context, bundle *Bundle, onClose func()) (_ ShimInstan
 
 즉 재시작 뒤의 복원은 "컨테이너를 다시 실행한다"가 아닙니다. 더 정확히는 "이미 살아 있는 shim에 다시 연결해 control plane 핸들을 회복한다"입니다.
 
-## shim task 연결 확인
+# shim task 연결 확인
 
 여기서 복구가 끝나지 않는다는 점이 중요합니다. `loadShimTask()`는 단순히 주소 문자열을 읽고 `shim` 객체를 만드는 데서 멈추지 않습니다. 임시 `shimTask` client를 만든 뒤 `PID()` 호출로 TaskService가 실제로 응답하는지 확인합니다.
 
@@ -349,7 +349,7 @@ func loadShimTask(ctx context.Context, bundle *Bundle, onClose func()) (_ *shimT
 
 ---
 
-## 마치며
+# 마치며
 
 shim 재연결은 `bootstrap.json`을 읽는 작은 helper 하나로 설명되기 쉽지만, 실제 코드는 더 구조적입니다. task manager 초기화가 복구를 시작하고, `loadShims()`가 bundle들을 다시 찾고, 각 bundle에 남아 있는 `bootstrap.json`이 복구 입력을 제공하며, `loadShim()`이 endpoint를 복원하고, `loadShimTask()`가 마지막으로 실제 응답까지 검증합니다.
 

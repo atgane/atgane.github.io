@@ -25,7 +25,7 @@ header:
 
 ---
 
-## Shim이 존재하는 이유와 shim 기동 과정의 출발점
+# Shim이 존재하는 이유와 shim 기동 과정의 출발점
 
 shim이 필요한 이유는 한 문장으로 요약할 수 있습니다. 컨테이너 프로세스의 수명을 containerd 데몬의 수명과 분리하기 위해서입니다.
 
@@ -216,7 +216,7 @@ func (m *ShimManager) Start(ctx context.Context, id string, bundle *Bundle, opts
 
 ---
 
-## Shim 바이너리 기동 흐름
+# Shim 바이너리 기동 흐름
 
 앞 절에서는 shim이 왜 필요한지와 `ShimManager.Start()`의 분기까지 확인했습니다. 이제부터는 그중에서도 `return m.startShim(ctx, bundle, id, opts)`로 내려가는 "새 shim 기동" 경로만 따로 떼어서 보겠습니다.
 
@@ -482,7 +482,7 @@ func parseStartResponse(response []byte) (client.BootstrapParams, error) {
 
 여기까지가 containerd가 shim endpoint를 확보하는 bootstrap 단계입니다.
 
-## 장수 shim 서버 초기화와 대기
+# 장수 shim 서버 초기화와 대기
 
 이제부터는 두 번째 프로세스만 보면 됩니다. 이 프로세스는 같은 `main()`으로 다시 들어오지만 이번에는 `action`이 비어 있으므로 `case "start"`로 빠지지 않고 장수 shim 서버 초기화로 계속 내려갑니다. 이 연결도 실제 코드로 보면 아래처럼 이어집니다.
 
@@ -622,7 +622,7 @@ func serveListener(path string, fd uintptr) (net.Listener, error) {
 - ttrpc 서버 루프: `CreateTask`, `StartTask`, `Wait`, `Kill` 같은 RPC 처리
 - signal/reaper 루프: `SIGCHLD`와 종료 신호 처리
 
-### 왜 장수 shim이 systemd 하위로 보이는가
+## 왜 장수 shim이 systemd 하위로 보이는가
 
 이제 `pstree`에서 왜 장수 shim이 systemd 하위로 보이는지도 자연스럽게 설명됩니다.
 
@@ -648,7 +648,7 @@ Restart=always
 
 ---
 
-## CreateTask: `runc create`
+# CreateTask: `runc create`
 
 이제부터는 이미 떠 있는 장수 shim이 ttrpc로 Task RPC를 받는 단계입니다. `CreateTask`의 실제 호출 코드로 바로 보면 아래처럼 이어집니다.
 
@@ -818,7 +818,7 @@ runc \
 
 ---
 
-## StartTask: `runc start`
+# StartTask: `runc start`
 
 앞 절에서 create 단계로 실행 준비를 마쳤다면, 이제 `StartTask`는 그 컨테이너를 실제 running 상태로 전환하는 단계입니다.
 
@@ -918,7 +918,7 @@ runc \
 
 ---
 
-## Subreaper와 프로세스 감시
+# Subreaper와 프로세스 감시
 
 앞 절에서 본 것처럼 `runc create`와 `runc start`는 금방 끝납니다. 그래서 이제 핵심은 "shim이 자기 direct child인 `runc` 종료만 아는 것"이 아니라, 그 뒤에 계속 남는 container init/exec descendant들의 종료를 어떻게 받아내느냐입니다. 그 역할을 수행하는 축이 바로 shim의 subreaper + reaper 조합입니다.
 
@@ -1128,11 +1128,11 @@ func (s *service) handleInitExit(e runcC.Exit, c *runc.Container, p *process.Ini
 
 ---
 
-## 이벤트 전달
+# 이벤트 전달
 
 지금까지는 shim이 exit를 받아내는 지점까지 봤습니다. 여기서부터는 설명 축을 명시적으로 둘로 나누겠습니다. 먼저 shim 프로세스 내부에서 종료 사실이 `WaitResponse`로 정리되는 단계만 보고, 그다음 containerd/CRI가 그 응답을 `exitCh`와 상태 store로 전달하는 단계를 보겠습니다.
 
-### shim 내부: `waitBlock`을 닫고 `Wait` RPC를 반환하는 단계
+## shim 내부: `waitBlock`을 닫고 `Wait` RPC를 반환하는 단계
 
 앞 절에서 본 `processExits()`의 마지막 단계에서는 `handleProcessExit()`가 `p.SetExited()`를 호출합니다. 여기까지는 모두 shim 프로세스 내부 코드입니다.
 
@@ -1227,7 +1227,7 @@ func (c *Container) Process(id string) (process.Process, error) {
 
 여기까지가 shim 내부 경계입니다. 이제부터는 shim 바깥, 즉 containerd와 CRI 코드로 넘어갑니다.
 
-### containerd/CRI: `WaitResponse`를 `exitCh`와 상태 store로 전달하는 단계
+## containerd/CRI: `WaitResponse`를 `exitCh`와 상태 store로 전달하는 단계
 
 파일 경로가 `client/`와 `internal/cri/server/`로 바뀌는 순간부터는 주체가 shim이 아니라 containerd client와 CRI 서비스입니다. 이 단계에서는 더 이상 `waitBlock`을 다루지 않고, shim이 이미 돌려준 `WaitResponse`를 상위 계층에 전달하는 일만 합니다.
 
@@ -1335,7 +1335,7 @@ func (c *criService) RunPodSandbox(ctx context.Context, r *runtime.RunPodSandbox
 
 ---
 
-## 마치며
+# 마치며
 
 여기까지의 흐름을 한 번에 묶어 보면, shim의 책임은 결국 네 단계로 정리됩니다.
 
