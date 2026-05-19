@@ -56,6 +56,8 @@ import (
 
 각 플러그인 패키지의 `init()` 함수가 import 될 때 실행됩니다. 이때 `registry.Register()`를 호출하여 플러그인의 타입, ID, 의존성, 초기화 함수(`InitFn`)를 전역 레지스트리에 등록합니다. 예를 들어 `GRPCPlugin`("images")은 gRPC 게이트웨이 역할을 하며 `ServicePlugin` 의존성을 선언합니다 ([plugins/services/images/service.go#L31](https://github.com/containerd/containerd/blob/v2.2.1/plugins/services/images/service.go#L31)).
 
+여기서 중요한 점은 builtins 패키지가 플러그인 인스턴스를 만드는 곳이 아니라, "어떤 플러그인이 존재하는지"를 미리 등록하는 곳이라는 점입니다. 이미지 경로만 놓고 보면 바깥쪽 `GRPCPlugin("images")`가 gRPC 핸들러를 노출하고, 안쪽 `ServicePlugin("images")`가 실제 이미지 store와 GC 의존성을 조립하는 두 겹 구조입니다.
+
 ```go
 // https://github.com/containerd/containerd/blob/dea7da592f5d1/plugins/services/images/service.go#L31
 func init() {
@@ -106,7 +108,7 @@ func init() {
 
 # 플러그인 로드 및 gRPC 서버 실행
 
-이번은 gRPC 서버가 어떻게 생성되고 플러그인이 초기화되는지 살펴보겠습니다. 이 흐름은 `main()`에서 출발합니다.
+이번에는 blank import로 쌓인 등록 정보가 실제 초기화 순서로 바뀌는 지점을 보겠습니다. 이 흐름은 `main()`에서 출발하지만, 핵심 helper는 `LoadPlugins()`와 `registry.Graph()`입니다.
 
 ```go
 // https://github.com/containerd/containerd/blob/dea7da592f5d1/cmd/containerd/main.go#L28
@@ -156,7 +158,7 @@ func App() *cli.App {
 }
 ```
 
-`server.New()`는 먼저 `LoadPlugins()`를 호출하여 전역 레지스트리에 등록된 모든 플러그인을 의존성 순서로 정렬된 슬라이스로 반환받습니다.
+`server.New()`는 바로 인스턴스를 만드는 대신, 먼저 어떤 순서로 `InitFn`을 실행해야 하는지부터 확정합니다. 이를 담당하는 첫 단계가 `LoadPlugins()`입니다.
 
 ```go
 // https://github.com/containerd/containerd/blob/dea7da592f5d1/cmd/containerd/server/server.go#L132

@@ -23,7 +23,7 @@ header:
 
 ---
 
-# TaskManager 초기화에서 일어나는 재연결
+# TaskManager와 Shim 재연결
 
 재연결은 나중에 어떤 요청이 들어왔을 때 즉흥적으로 일어나는 동작이 아닙니다. containerd의 runtime v2 task manager가 올라오는 순간, 먼저 기존 shim들을 복구하려고 시도합니다.
 
@@ -72,9 +72,9 @@ func (m *ShimManager) LoadExistingShims(ctx context.Context, stateDir string, ro
 
 여기서 `stateDir`는 기본 구성에서 대략 `/run/containerd/io.containerd.runtime.v2.task`입니다. 또 kubernetes는 containerd를 `k8s.io` namespace로 띄우는 게 일반적이므로, 실제 복구 대상 디렉터리는 `/run/containerd/io.containerd.runtime.v2.task/k8s.io/`가 됩니다. 이 아래에 pod sandbox나 workload container 단위로 bundle 디렉터리가 놓이는 형태입니다.
 
-# bundle 단위로 복구 진행
+# bundle 단위 복구
 
-containerd namespace 하나를 고른 뒤 containerd가 실제로 다시 여는 것은 bundle 디렉터리들입니다. 즉 복구의 실질적인 단위는 "namespace 아래의 각 task/container bundle"입니다.
+containerd namespace 하나를 고른 뒤 containerd가 실제로 다시 여는 것은 bundle 디렉터리들입니다. 즉 복구의 실질적인 단위는 "namespace 아래의 각 task/container bundle"입니다. 여기서 bundle은 `stateDir/<namespace>/<task-id>/` 아래에 놓이는 OCI bundle 디렉터리이며, 이후 복구 코드는 이 디렉터리 안의 `bootstrap.json`과 상태 파일을 다시 읽는 방식으로 진행됩니다.
 
 ```go
 // https://github.com/containerd/containerd/blob/dea7da592f5d1/core/runtime/v2/shim_load.go#L65-L123
@@ -151,7 +151,7 @@ type Bundle struct {
 
 여기까지 읽으면 자연스럽게 질문이 생깁니다. "bundle 디렉터리만 보고 containerd가 어떻게 어떤 shim endpoint에 다시 붙어야 하는지 알 수 있을까?"
 
-# bundle에서 endpoint 정보 확인
+# bundle의 endpoint 정보
 
 복구 시점에 containerd가 새로 추론하는 것은 많지 않습니다. 핵심 정보는 컨테이너를 처음 만들 때 이미 bundle 안에 기록해 둡니다. 가장 일반적인 경로에서는 shim bootstrap이 끝나는 순간 `bootstrap.json`이 바로 쓰입니다.
 
@@ -235,7 +235,7 @@ func (m *ShimManager) Start(ctx context.Context, id string, bundle *Bundle, opts
 
 참고로 v2.2.1 기준으로 `sandbox` 파일은 이 컨테이너가 어느 sandbox에 속하는지 기록해 두는 용도이고, `LoadExistingShims()`가 재시작 복구 중에 다시 읽는 핵심 입력은 아닙니다. 재연결의 직접 입력은 `bootstrap.json`입니다.
 
-# `restoreBootstrapParams()`를 통한 복구 입력 확보
+# restoreBootstrapParams 복구 입력
 
 재시작 뒤에는 `restoreBootstrapParams()`가 bundle 아래의 `bootstrap.json`을 읽어 복구에 필요한 `Version`, `Protocol`, `Address`를 되살립니다. 구버전 shim이면 예전 `address` 파일에서 migrate하는 경로도 여기 포함됩니다.
 

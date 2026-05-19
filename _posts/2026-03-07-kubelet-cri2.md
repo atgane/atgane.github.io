@@ -21,7 +21,7 @@ header:
 
 kubelet은 컨테이너 런타임과 직접 결합하지 않고, CRI(Container Runtime Interface)라는 gRPC 기반의 표준 인터페이스를 통해 통신합니다. 이 문서는 `SyncPod`가 런타임을 호출하는 지점에서 출발하여, 그 호출이 어떤 인터페이스로 정의되어 있는지, 그리고 kubelet 기동 시 해당 인터페이스 구현체가 어떻게 초기화되고 연결되는지를 코드 레벨로 따라갑니다.
 
-# kubelet SyncPod에서 CRI가 호출되는 지점
+# SyncPod와 CRI 호출 지점
 
 이전 문서에서 살펴본 것처럼, `kl.SyncPod()`는 결국 `kl.containerRuntime.SyncPod()`, 즉 `kubeGenericRuntimeManager.SyncPod()`를 호출합니다. 
 
@@ -114,7 +114,7 @@ type ContainerManager interface {
 
 런타임(containerd, CRI-O 등)은 이 인터페이스를 구현하기만 하면 kubelet에 교체 가능하게 연결됩니다. kubelet 내부에서 이 인터페이스의 실제 구현체가 어떻게 생성되고 주입되는지는 다음 절에서 살펴봅니다.
 
-# kubelet 내부에서 CRI 초기화
+# kubelet 내부 CRI 초기화
 
 kubelet은 기동 시 `run()` 함수 안에서 `PreInitRuntimeService()`를 호출하여 CRI gRPC 연결을 먼저 수립합니다. `RunKubelet()` 이전에 수행하는 이유는, cgroup 드라이버 설정(`getCgroupDriverFromCRI`) 등 kubelet 초기화에 앞서 런타임 정보가 필요하기 때문입니다.
 
@@ -235,7 +235,7 @@ func NewKubeGenericRuntimeManager(
 }
 ```
 
-# 쉘에서 CRI(containerd를 예시로) 동작 관찰
+# 쉘에서 보는 CRI 동작
 
 이번에는 CRI 구성을 어떻게 kubernetes가 설치된 환경에서 관찰할 수 있는지 살펴보겠습니다. 진행은 kind 클러스터에서 수행하였으며, kubelet이 containerd를 런타임으로 사용하도록 설정되어 있습니다.
 
@@ -320,7 +320,7 @@ flowchart TD
 
 ## 프로세스 트리 확인
 
-kubelet과 containerd, 그리고 shim과 runc이 어떻게 계층적으로 연결되어 있는지 `pstree` 명령어로 확인해봅시다.
+앞 다이어그램이 호출 경로를 개념적으로 정리한 것이었다면, 아래 `pstree`는 같은 관계를 실제 프로세스 계층에서 확인하는 단계입니다. kubelet과 containerd, 그리고 shim과 runc이 어떻게 연결되어 보이는지 그대로 대응시켜 읽어보면 됩니다.
 
 ```bash
 apt update && apt install -y psmisc

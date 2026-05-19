@@ -22,7 +22,7 @@ header:
 
 ---
 
-# 내부 RPC 흐름
+# CRI 핸들러 등록과 요청 흐름
 
 `plugins/cri/cri.go`의 `init()`은 `GRPCPlugin` 타입의 `"cri"` 플러그인을 전역 레지스트리에 등록합니다.
 
@@ -77,6 +77,10 @@ func (c *criGRPCServer) Register(s *grpc.Server) error {
 `RunPodSandbox`는 파드 수준의 샌드박스를 생성하고 시작하는 메서드입니다. 샌드박스는 파드 내의 모든 컨테이너가 공유하는 네트워크/IPC 네임스페이스의 기준점 역할을 하며, 흔히 `pause` 컨테이너라고 불립니다.
 
 구현은 `internal/cri/server/sandbox_run.go`의 `criService.RunPodSandbox`에 있으며, 단계별로 살펴보면 다음과 같습니다.
+
+- 샌드박스 ID와 메타데이터를 확보합니다.
+- 파드 전용 netns를 만들고 CNI를 실행합니다.
+- pause 컨테이너를 생성하고 시작해 파드의 기준점을 세웁니다.
 
 ### 샌드박스 ID 예약과 메타데이터 생성
 
@@ -149,7 +153,12 @@ func NewNetNSFromPID(baseDir string, pid uint32) (*NetNS, error) {
 }
 ```
 
-`newNS()` 내부에서는 전용 OS 스레드를 잠근 고루틴 안에서 두 가지 핵심 작업을 수행합니다. 첫 번째는 `unshare` syscall로 새 netns를 생성하는 것이고, 두 번째는 바인드 마운트로 그 netns를 파일시스템 경로에 고정하는 것입니다.
+`newNS()`가 길어지는 이유는 한 함수 안에서 netns 생성, 생존 보장, 경로 고정까지 한 번에 처리하기 때문입니다. 코드를 보기 전에 이 helper의 역할을 네 단계로 먼저 고정해 두면 읽기가 훨씬 쉽습니다.
+
+- netns 이름과 마운트 포인트 파일을 준비합니다.
+- 전용 OS 스레드를 잠가 `unshare(CLONE_NEWNET)`를 실행합니다.
+- 원래 netns 복귀 여부를 런타임 버전에 맞게 정리합니다.
+- 새 netns를 `/var/run/netns/cni-<uuid>`에 바인드 마운트해 살아 있게 붙잡습니다.
 
 Linux 네트워크 네임스페이스는 프로세스가 아니라 OS 스레드 단위로 적용되는 커널 오브젝트입니다. `unshare(CLONE_NEWNET)`은 현재 OS 스레드의 네트워크 네임스페이스를 새로 분리하는 syscall입니다. `clone(CLONE_NEWNET)`처럼 새 프로세스를 생성하지 않고, 오직 현재 스레드가 새 netns로 전환됩니다. 그런데 Go 런타임은 M:N 스레드 모델(가상 고루틴 : OS 스레드 = N:M)이기 때문에, 일반 고루틴은 실행 중에 다른 OS 스레드로 이동할 수 있습니다. netns는 스레드 단위이므로 OS 스레드를 고루틴에 고정(`LockOSThread`)하지 않으면 `unshare` 효과가 사라집니다. 따라서 전용 고루틴을 만들고 그 안에서 `LockOSThread`를 호출한 뒤 `unshare`를 수행합니다.
 
@@ -199,6 +208,8 @@ func newNS(baseDir string, pid uint32) (nsPath string, err error) {
 이렇게 하면 `CLONE_NEWNET`으로 생성된 netns는 OS 스레드가 파기된 뒤에도 바인드 마운트 참조를 통해 살아있게 됩니다. 이후 CNI 플러그인이 veth pair를 생성하고 한쪽 끝을 이 netns 경로로 이동시키며, pause 프로세스가 시작될 때 해당 경로로 `setns()`를 호출하여 공유 네트워크 환경에 진입합니다.
 
 #### setupPodNetwork와 CNI 호출
+
+앞 단계가 netns 자체를 만들고 살아 있게 유지하는 과정이었다면, 이제부터는 그 경로를 CNI 표준 입력으로 바꾸어 실제 네트워크 구성을 위임하는 단계입니다.
 
 netns 파일 경로가 준비되면 `setupPodNetwork()`가 CNI 플러그인을 실행합니다.
 

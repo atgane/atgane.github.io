@@ -446,7 +446,7 @@ extenders:
 
 참조: [kube-scheduler Configuration (v1) — Extender](https://kubernetes.io/docs/reference/config-api/kube-scheduler-config.v1/#Extender)
 
-`schedulingCycle`과 `bindingCycle`의 전체 플러그인 실행 순서를 정리하면 다음과 같습니다.
+`schedulingCycle`과 `bindingCycle`의 전체 플러그인 실행 순서를 한 번에 보면 아래와 같습니다. 앞에서 본 extender와 framework plugin이 어느 단계에 걸리는지도 이 그림에서 함께 읽을 수 있습니다.
 
 ```mermaid
 flowchart TD
@@ -471,9 +471,9 @@ flowchart TD
     I --> J["kubelet이 NodeName 감지 Pod 실제 실행"]
 ```
 
-## 궁금한 점
+## custom scheduler와 plugin 등록
 
-### 그럼 custom scheduler, plugin은 어떻게 등록하는지?
+### scheduler 바이너리와 프로필 등록
 
 애초에 코드 레벨에서 플러그인이 추가된 scheduler를 빌드해야 합니다. 예시 코드는 다음과 같습니다.
 

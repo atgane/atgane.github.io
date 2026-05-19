@@ -53,7 +53,7 @@ func (c *criService) RunPodSandbox(...) {
 
 ## CNI 설정 읽기
 
-containerd는 파드 생성 시점마다 CNI 설정 파일을 임의로 찾는 것이 아니라, 서비스 초기화 단계에서 먼저 CNI 로더를 만들고 `conf_dir`, `bin_dirs`, `max_conf_num`을 주입합니다. Linux 기본값은 CNI 바이너리 디렉터리 `/opt/cni/bin`, CNI 설정 디렉터리 `/etc/cni/net.d`, 그리고 최대 1개의 설정 로드입니다.
+containerd는 파드 생성 시점마다 CNI 설정 파일을 임의로 찾는 것이 아니라, 서비스 초기화 단계에서 먼저 CNI 로더를 만들고 `conf_dir`, `bin_dirs`, `max_conf_num`을 주입합니다. Linux 기본값은 CNI 바이너리 디렉터리 `/opt/cni/bin`, CNI 설정 디렉터리 `/etc/cni/net.d`, 그리고 최대 1개의 설정 로드입니다. 이 절은 서비스 초기화, `Load()` opt 실행, 그리고 watch 기반 재로드 순서로 읽으면 흐름이 자연스럽습니다.
 
 ```go
 // https://github.com/containerd/containerd/blob/dea7da592f5d1/internal/cri/config/config_unix.go#L26-L27
@@ -159,7 +159,7 @@ func (c *libcni) Load(opts ...Opt) error {
 }
 ```
 
-위의 `Load()` 안의 `for _, o := range opts`가 Linux 경로에서 넘겨받은 opt를 순서대로 실행하고, 그 opt 목록은 `cniLoadOptions()`가 만듭니다. 즉 이 구간은 `cniLoadOptions()`가 `WithLoNetwork`, `WithDefaultConf`를 돌려주고, `Load()`가 그중 `WithDefaultConf()`를 실행한 뒤, 그 함수 안에서 `loadFromConfDir()`로 내려가게 됩니다.
+위의 `Load()` 안의 `for _, o := range opts`가 Linux 경로에서 넘겨받은 opt를 순서대로 실행하고, 그 opt 목록은 `cniLoadOptions()`가 만듭니다. 코드를 보기 전에 역할만 먼저 고정하면, `WithLoNetwork`는 loopback 네트워크를 추가하고 `WithDefaultConf`는 실제 기본 CNI 설정 파일을 고르는 helper입니다. 즉 이 구간은 `cniLoadOptions()`가 `WithLoNetwork`, `WithDefaultConf`를 돌려주고, `Load()`가 그중 `WithDefaultConf()`를 실행한 뒤, 그 함수 안에서 `loadFromConfDir()`로 내려가게 됩니다.
 
 이 지점의 호출 흐름은 다음과 같습니다.
 
@@ -357,9 +357,9 @@ func (c *libcni) GetConfig() *ConfigResult {
 
 즉 `crictl info`를 보면 단순히 `conf_dir` 경로만이 아니라, containerd가 실제로 어떤 CNI 설정을 파싱해 들고 있는지도 확인할 수 있습니다. 반대로 `lastCNILoadStatus`에 에러가 보이면 `/etc/cni/net.d` 아래 파일 형식이나 `type`에 맞는 바이너리 존재 여부를 먼저 의심하면 됩니다.
 
-## 기준
+## 파드 생성 시점
 
-이제 기준점은 두 층입니다. 서비스 시작 시점에는 방금 본 `Load()` 경로가 어떤 CNI config를 쓸지 먼저 확정합니다. 그다음 파드 생성 시점에는 `RunPodSandbox()`에서 `setupPodNetwork()`로 내려오며, 이미 로드된 그 config에 파드별 런타임 값을 주입합니다.
+이제 시점을 파드 생성으로 옮기겠습니다. 서비스 시작 시점에는 방금 본 `Load()` 경로가 어떤 CNI config를 쓸지 먼저 확정하고, 파드 생성 시점에는 `RunPodSandbox()`에서 `setupPodNetwork()`로 내려오며 이미 로드된 그 config에 파드별 런타임 값을 주입합니다.
 
 즉 실제 흐름은 다음과 같습니다.
 
@@ -488,7 +488,7 @@ func (e *RawExec) ExecPlugin(ctx context.Context, pluginPath string, stdinData [
 
 ## CNI_ARGS
 
-먼저 파드 메타데이터는 `WithLabels()`를 통해 `Args`로 들어갑니다.
+여기서부터는 `setupPodNetwork()`가 만든 입력이 env와 stdin으로 어떻게 갈라지는지를 나누어 봅니다. 먼저 파드 메타데이터는 `WithLabels()`를 통해 `Args`로 들어갑니다.
 
 ```go
 // https://github.com/containerd/containerd/blob/dea7da592f5d1/internal/cri/server/sandbox_run.go#L440
